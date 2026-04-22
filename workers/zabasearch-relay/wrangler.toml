@@ -1,0 +1,7 @@
+name = "zabasearch-relay"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Secrets (set via `wrangler secret put <name>`):
+#   RELAY_TOKEN — shared token for the /relay endpoint used by Supabase Edge Functions
