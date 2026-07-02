@@ -1,0 +1,5 @@
+camoufox[geoip]
+curl_cffi
+beautifulsoup4
+fastapi
+uvicorn[standard]
