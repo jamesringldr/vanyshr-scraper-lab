@@ -1,0 +1,3 @@
+scraper-lab.vanyshr.com {
+    reverse_proxy scraper-api:8080
+}
