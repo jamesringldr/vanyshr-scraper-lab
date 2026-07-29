@@ -1,0 +1,18 @@
+# Python envs / caches
+.venv-local/
+venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+
+# Browser profiles (patchright / edge / chrome-for-testing)
+edge-profile/
+cft-profile/
+
+# Run artifacts: screenshots, videos, scraped HTML (PII!), harvested cookies
+out/
+
+# Parser-dev sample pages contain real scraped PII — keep code checkpoints, not data
+checkpoints/*.html

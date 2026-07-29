@@ -27,7 +27,7 @@ const ZABA_HEADERS: HeadersInit = {
   Referer: "https://www.zabasearch.com/",
 };
 
-const ALLOWED_DOMAINS = ["zabasearch.com", "fastpeoplesearch.com"];
+const ALLOWED_DOMAINS = ["zabasearch.com", "fastpeoplesearch.com", "anywho.com"];
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
