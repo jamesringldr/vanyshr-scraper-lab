@@ -68,6 +68,7 @@ def run_smoke(first: str, last: str, city: str, state: str, out_dir: Path,
     proc = subprocess.Popen(
         args, cwd=str(SCRIPT_DIR), env=env,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace",
         **popen_kwargs,
     )
     try:

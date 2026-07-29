@@ -16,7 +16,7 @@ Usage:
   ./anywho_test.py John Fryer            # name-only (no city/state)
   ./anywho_test.py John Fryer --raw      # also dump fetched HTML to /tmp
 """
-import sys, re, urllib.request, urllib.error
+import sys, re, urllib.request, urllib.error, unicodedata
 from html.parser import HTMLParser
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -40,6 +40,7 @@ STATE_NAMES = {
 def slug(s):
     """formatNameForUrl: lowercase, non-alphanumerics -> '-', collapse, trim."""
     s = s.lower()
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     s = re.sub(r"[^a-z0-9]", "-", s)
     s = re.sub(r"-+", "-", s)
     return s.strip("-")
@@ -110,20 +111,29 @@ def fetch(url):
 
 def is_blocked(html):
     return ("Just a moment" in html or "Checking your browser" in html
-            or "Access denied" in html or len(html) < 500)
+            or "Access denied" in html or len(html) < 200)
 
 # ---- parse cards -------------------------------------------------------------
 def section_after(h3_node):
-    """Reconstructed text of the sibling block following a section's <h3>."""
-    sib = h3_node.parent
-    if sib is None:
+    """Extract value from h3 header (either from text after colon or from siblings)."""
+    h3_text = h3_node.text()
+    if ":" in h3_text:
+        parts = h3_text.split(":", 1)
+        if len(parts) > 1:
+            return clean(parts[1])
+    if h3_node.parent is None:
         return ""
-    # siblings of the <h3> within its container hold the values
+    found = False
     vals = []
     for c in h3_node.parent.children:
-        if isinstance(c, Node) and c is not h3_node:
-            vals.append(c.text())
-    return clean(" ".join(vals))
+        if found:
+            if isinstance(c, Node):
+                vals.append(c.text())
+            elif isinstance(c, str) and c.strip():
+                vals.append(c)
+        elif isinstance(c, Node) and c is h3_node:
+            found = True
+    return clean(" ".join(vals)) if vals else ""
 
 NAME_RE = re.compile(r"^[A-Z][a-z]+(?:\s+[A-Z][a-z.]*){1,3}$")
 
@@ -160,7 +170,12 @@ def headers_map(card):
     """Map of lowercased h3 header text -> reconstructed value block."""
     out = {}
     for h3 in (n for n in card.walk() if n.tag == "h3"):
-        label = clean(h3.text()).lower().rstrip(":")
+        h3_text = clean(h3.text())
+        if ":" in h3_text:
+            label_part = h3_text.split(":", 1)[0]
+        else:
+            label_part = h3_text
+        label = label_part.lower()
         if label:
             out.setdefault(label, []).append(section_after(h3))
     return out
@@ -183,15 +198,15 @@ def extract(card, name):
     used = first("used to live")
     related = first("may be related", "related to")
 
-    # phones: each value block under "phone number" header, split on bullets
+    # phones: extract all digit sequences from "phone number" headers, reconstruct from data-content
     phones = []
     for label, vals in hm.items():
         if label.startswith("phone"):
             for v in vals:
-                for p in re.split(r"[•·]", v):
-                    digits = re.sub(r"\D", "", p)
-                    if len(digits) >= 10:
-                        phones.append(clean(p))
+                digits_only = re.sub(r"\D", "", v)
+                if len(digits_only) >= 10:
+                    formatted = re.sub(r"(\d{3})(\d{3})(\d{4})", r"\1-\2-\3", digits_only)
+                    phones.append(formatted)
 
     # detail link (absolute)
     detail = None
