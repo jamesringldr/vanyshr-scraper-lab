@@ -4,8 +4,8 @@ Result Transformer — Convert real scraper responses to DB schema format
 
 Each scraper's real response shape is different:
   - FPS (service.py):        single object, QuickScanProfileData shape
-  - Anywho/Zabasearch
-    (universal-search):      { profiles: ProfileMatch[] }, one row per match
+  - Zaba (workers/zaba):     residential HTTP service — same pattern as FPS
+  - Anywho (universal-search): { profiles: ProfileMatch[] }, one row per match
 
 This module normalizes both into scrape_results table rows
 (summary_results + full_profile_results).
@@ -47,11 +47,9 @@ def transform_fps_response(fps_response: Dict[str, Any]) -> Dict[str, Any]:
 
 def transform_profile_match(match: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Anywho/Zabasearch (via universal-search) return ProfileMatch objects:
+    Anywho (via universal-search) returns ProfileMatch objects:
       { id, name, age?, city_state?, phone_snippet?, detail_link?, source,
         match_score?, fullProfile? }
-
-    fullProfile (when present, e.g. Zabasearch) is a legacy PersonProfile shape.
     """
     summary = {
         "id": match.get("id"),
@@ -69,6 +67,40 @@ def transform_profile_match(match: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "summary_results": summary,
         "full_profile_results": full_profile,
+    }
+
+
+def transform_zaba_service_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    workers/zaba service returns parsed person cards:
+      { id, name, age, city_state, phone_snippet, phones[], addresses[],
+        relatives[], aliases[], emails[], detail_link, source }
+    """
+    phones = profile.get("phones") or []
+    phone_numbers = []
+    for p in phones:
+        if isinstance(p, dict) and p.get("number"):
+            phone_numbers.append(p["number"])
+        elif isinstance(p, str):
+            phone_numbers.append(p)
+
+    summary = {
+        "id": profile.get("id"),
+        "name": profile.get("name"),
+        "age": profile.get("age"),
+        "location": profile.get("city_state"),
+        "phone_snippet": profile.get("phone_snippet") or (phone_numbers[0] if phone_numbers else None),
+        "phones": phone_numbers or None,
+        "detail_link": profile.get("detail_link"),
+        "source": profile.get("source") or "Zabasearch",
+    }
+
+    # Full profile is the service card itself (already rich)
+    full_profile = {k: v for k, v in profile.items() if k not in ("status", "error")}
+
+    return {
+        "summary_results": summary,
+        "full_profile_results": full_profile if full_profile else None,
     }
 
 
@@ -111,6 +143,99 @@ def normalize_fps_row(
     }
 
 
+def normalize_zaba_service_rows(
+    scrape_id: str,
+    mode: str,
+    scrape_type: str,
+    input_data: Dict[str, Any],
+    zaba_response: Dict[str, Any],
+    response_time_ms: int,
+    response_bytes: int,
+) -> List[Dict[str, Any]]:
+    """Build DB row(s) from workers/zaba /v1/zaba/search response."""
+    raw_status = zaba_response.get("status", "failed")
+    profiles = zaba_response.get("profiles") or []
+
+    if raw_status == "failed" or (raw_status != "success" and raw_status != "no_results" and not profiles):
+        return [{
+            "scrape_id": scrape_id,
+            "target": "zabasearch",
+            "mode": mode,
+            "scrape_type": scrape_type,
+            "input_data": input_data,
+            "summary_results": None,
+            "full_profile_results": None,
+            "errors": zaba_response.get("error") or raw_status,
+            "status": "failed",
+            "response_time_ms": response_time_ms,
+            "response_bytes": response_bytes,
+        }]
+
+    if not profiles:
+        return [{
+            "scrape_id": scrape_id,
+            "target": "zabasearch",
+            "mode": mode,
+            "scrape_type": scrape_type,
+            "input_data": input_data,
+            "summary_results": None,
+            "full_profile_results": None,
+            "errors": None,
+            "status": "success",
+            "response_time_ms": response_time_ms,
+            "response_bytes": response_bytes,
+        }]
+
+    rows = []
+    for profile in profiles:
+        if scrape_type == "summary":
+            transformed = transform_zaba_service_profile(profile)
+            rows.append({
+                "scrape_id": scrape_id,
+                "target": "zabasearch",
+                "mode": mode,
+                "scrape_type": scrape_type,
+                "input_data": input_data,
+                "summary_results": transformed["summary_results"],
+                "full_profile_results": None,
+                "errors": None,
+                "status": "success",
+                "response_time_ms": response_time_ms,
+                "response_bytes": response_bytes,
+            })
+        elif scrape_type == "full":
+            transformed = transform_zaba_service_profile(profile)
+            rows.append({
+                "scrape_id": scrape_id,
+                "target": "zabasearch",
+                "mode": mode,
+                "scrape_type": scrape_type,
+                "input_data": input_data,
+                "summary_results": None,
+                "full_profile_results": transformed["full_profile_results"],
+                "errors": None,
+                "status": "success",
+                "response_time_ms": response_time_ms,
+                "response_bytes": response_bytes,
+            })
+        else:  # both
+            transformed = transform_zaba_service_profile(profile)
+            rows.append({
+                "scrape_id": scrape_id,
+                "target": "zabasearch",
+                "mode": mode,
+                "scrape_type": scrape_type,
+                "input_data": input_data,
+                "summary_results": transformed["summary_results"],
+                "full_profile_results": transformed["full_profile_results"],
+                "errors": None,
+                "status": "success",
+                "response_time_ms": response_time_ms,
+                "response_bytes": response_bytes,
+            })
+    return rows
+
+
 def normalize_relay_rows(
     scrape_id: str,
     target: str,
@@ -122,10 +247,9 @@ def normalize_relay_rows(
     response_bytes: int,
 ) -> List[Dict[str, Any]]:
     """
-    Build one DB row per match returned by universal-search for
-    Anywho/Zabasearch. Returns an empty list if the call failed outright
-    (caller should log a single failed row in that case).
+    Build one DB row per match returned by universal-search (AnyWho).
     """
+
     profiles = universal_search_response.get("profiles") or []
     scraper_failed = universal_search_response.get("scraper_failed", False)
 

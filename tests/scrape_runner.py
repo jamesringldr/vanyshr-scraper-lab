@@ -6,30 +6,27 @@ Scrape Runner — Integration Test Script
 Calls the REAL scraper implementations (not mocks) and logs results to the
 scrape_results table.
 
-  - FPS:                  service.py directly (local instance or serv01)
-  - Anywho / Zabasearch:  the live universal-search Supabase Edge Function
-                          (the actual production caller of AnyWhoScraper.ts /
-                          ZabasearchScraper.ts — no separate local/prod path,
-                          this is a single globally-deployed endpoint)
+  - FPS:           workers/fps service on serv01 (:8787) — residential, not edge
+  - Zabasearch:    workers/zaba service on serv01 (:8788) — residential, not edge
+  - Anywho:        live universal-search Supabase Edge Function only
 
 Usage:
   python scrape_runner.py --target fps --mode local --type summary --input first_name=John last_name=Doe city="San Francisco" state=CA
   python scrape_runner.py --target anywho --mode prod --type summary --input first_name=Jane last_name=Smith
-  python scrape_runner.py --target zabasearch --mode prod --type full --input phone="415-555-0123"
+  python scrape_runner.py --target zabasearch --mode prod --type full --input first_name=Jane last_name=Smith city=Cameron state=MO
   python scrape_runner.py --target quickscan --mode local --type summary --input first_name=John last_name=Doe city="San Francisco" state=CA
 
 Arguments:
   --target      (fps|anywho|zabasearch|quickscan)
-  --mode        (local|prod) — only meaningful for fps; anywho/zabasearch always
-                hit the single deployed universal-search endpoint regardless
-  --type        (summary|full|both) — full only affects anywho/zabasearch response
-                completeness in practice (fps always returns full profile data)
+  --mode        (local|prod) — meaningful for fps + zabasearch (serv01 vs localhost)
+                anywho always hits the single deployed universal-search endpoint
+  --type        (summary|full|both)
   --input       key=value pairs: first_name, last_name, city, state, phone
 
 Environment (.env.local in Vanyshr-mono):
   SUPABASE_URL, SUPABASE_ANON_KEY
   FPS_LOCAL_URL, FPS_PROD_URL, FPS_SERVICE_TOKEN
-  CF_RELAY_URL, CF_RELAY_TOKEN  (unused directly here — universal-search owns relay auth)
+  ZABA_LOCAL_URL, ZABA_PROD_URL, ZABA_SERVICE_TOKEN
   QUICKSCAN_MODE
 """
 
@@ -46,7 +43,11 @@ from typing import Any, Dict, List, Optional
 import httpx
 from dotenv import load_dotenv
 
-from scrape_result_transformer import normalize_fps_row, normalize_relay_rows
+from scrape_result_transformer import (
+    normalize_fps_row,
+    normalize_relay_rows,
+    normalize_zaba_service_rows,
+)
 
 
 def _load_env():
@@ -78,11 +79,15 @@ FPS_LOCAL_URL = os.getenv("FPS_LOCAL_URL", "http://localhost:8787")
 FPS_PROD_URL = os.getenv("FPS_PROD_URL", "")
 FPS_SERVICE_TOKEN = os.getenv("FPS_SERVICE_TOKEN", "")
 
+ZABA_LOCAL_URL = os.getenv("ZABA_LOCAL_URL", "http://localhost:8788")
+ZABA_PROD_URL = os.getenv("ZABA_PROD_URL", "")
+ZABA_SERVICE_TOKEN = os.getenv("ZABA_SERVICE_TOKEN", "")
+
 UNIVERSAL_SEARCH_URL = f"{SUPABASE_URL}/functions/v1/universal-search" if SUPABASE_URL else ""
 
 QUICKSCAN_SEQUENCE = os.getenv("QUICKSCAN_MODE", "fps,anywho,zabasearch").split(",")
 
-SITE_NAME_MAP = {"anywho": "AnyWho", "zabasearch": "Zabasearch"}
+SITE_NAME_MAP = {"anywho": "AnyWho"}  # edge only — zaba is not via universal-search
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -177,11 +182,13 @@ class ScraperRunner:
             )]
 
     async def _run_via_universal_search(self, target: str) -> List[Dict[str, Any]]:
-        """Call the live universal-search Edge Function for anywho/zabasearch.
+        """Call the live universal-search Edge Function (AnyWho only).
 
         Note: this writes a real (but ephemeral, 30-min TTL) row to the prod
         quick_scans table — that's how the endpoint is designed to work.
         """
+        if target not in SITE_NAME_MAP:
+            raise ValueError(f"{target} is not edge-routed; use residential service")
         site_name = SITE_NAME_MAP[target]
         body = {
             "firstName": self.input_data.get("first_name", ""),
@@ -244,7 +251,71 @@ class ScraperRunner:
         return await self._run_via_universal_search("anywho")
 
     async def run_zabasearch(self) -> List[Dict[str, Any]]:
-        return await self._run_via_universal_search("zabasearch")
+        """Call zaba service.py on serv01/local — same pattern as FPS (not edge)."""
+        url = ZABA_PROD_URL if self.mode == "prod" else ZABA_LOCAL_URL
+        if not url:
+            logger.error(
+                f"[{self.scrape_id}] ZABA_PROD_URL / ZABA_LOCAL_URL not set "
+                "(residential service base URL)"
+            )
+            return [{
+                "scrape_id": self.scrape_id, "target": "zabasearch", "mode": self.mode,
+                "scrape_type": self.scrape_type, "input_data": self.input_data,
+                "summary_results": None, "full_profile_results": None,
+                "errors": "ZABA_PROD_URL / ZABA_LOCAL_URL not configured",
+                "status": "failed", "response_time_ms": 0, "response_bytes": 0,
+            }]
+
+        endpoint = f"{url.rstrip('/')}/v1/zaba/search"
+        body = {
+            "first_name": self.input_data.get("first_name", ""),
+            "last_name": self.input_data.get("last_name", ""),
+            "city": self.input_data.get("city") or None,
+            "state": self.input_data.get("state") or None,
+        }
+        headers = {"Content-Type": "application/json"}
+        if self.mode == "prod" and ZABA_SERVICE_TOKEN:
+            headers["Authorization"] = f"Bearer {ZABA_SERVICE_TOKEN}"
+
+        logger.info(f"[{self.scrape_id}] POST {endpoint} body={body}")
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(endpoint, json=body, headers=headers)
+                response_time_ms = int(response.elapsed.total_seconds() * 1000)
+                response.raise_for_status()
+                data = response.json()
+                logger.info(
+                    f"[{self.scrape_id}] Zaba status={data.get('status')} "
+                    f"count={data.get('count', 0)}"
+                )
+                return normalize_zaba_service_rows(
+                    scrape_id=self.scrape_id,
+                    mode=self.mode,
+                    scrape_type=self.scrape_type,
+                    input_data=self.input_data,
+                    zaba_response=data,
+                    response_time_ms=response_time_ms,
+                    response_bytes=len(response.content),
+                )
+        except httpx.TimeoutException:
+            logger.error(f"[{self.scrape_id}] Zaba timeout")
+            return [{
+                "scrape_id": self.scrape_id, "target": "zabasearch", "mode": self.mode,
+                "scrape_type": self.scrape_type, "input_data": self.input_data,
+                "summary_results": None, "full_profile_results": None,
+                "errors": "timeout after 120s", "status": "timeout",
+                "response_time_ms": 120000, "response_bytes": 0,
+            }]
+        except Exception as e:
+            logger.error(f"[{self.scrape_id}] Zaba failed: {e}")
+            return [{
+                "scrape_id": self.scrape_id, "target": "zabasearch", "mode": self.mode,
+                "scrape_type": self.scrape_type, "input_data": self.input_data,
+                "summary_results": None, "full_profile_results": None,
+                "errors": str(e), "status": "failed",
+                "response_time_ms": 0, "response_bytes": 0,
+            }]
 
     async def run(self) -> List[Dict[str, Any]]:
         if self.target == "fps":
