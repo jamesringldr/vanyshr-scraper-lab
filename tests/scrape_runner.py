@@ -8,17 +8,19 @@ scrape_results table.
 
   - FPS:           workers/fps service on serv01 (:8787) — residential, not edge
   - Zabasearch:    workers/zaba service on serv01 (:8788) — residential, not edge
+  - NPD:           workers/npd service on serv01 (:8789) — residential, not edge
   - Anywho:        live universal-search Supabase Edge Function only
 
 Usage:
   python scrape_runner.py --target fps --mode local --type summary --input first_name=John last_name=Doe city="San Francisco" state=CA
   python scrape_runner.py --target anywho --mode prod --type summary --input first_name=Jane last_name=Smith
   python scrape_runner.py --target zabasearch --mode prod --type full --input first_name=Jane last_name=Smith city=Cameron state=MO
+  python scrape_runner.py --target npd --mode prod --type both --input first_name=James last_name=Oehring city=Cameron state=MO
   python scrape_runner.py --target quickscan --mode local --type summary --input first_name=John last_name=Doe city="San Francisco" state=CA
 
 Arguments:
-  --target      (fps|anywho|zabasearch|quickscan)
-  --mode        (local|prod) — meaningful for fps + zabasearch (serv01 vs localhost)
+  --target      (fps|anywho|zabasearch|npd|quickscan)
+  --mode        (local|prod) — meaningful for fps/zaba/npd (serv01 vs localhost)
                 anywho always hits the single deployed universal-search endpoint
   --type        (summary|full|both)
   --input       key=value pairs: first_name, last_name, city, state, phone
@@ -27,6 +29,7 @@ Environment (.env.local in Vanyshr-mono):
   SUPABASE_URL, SUPABASE_ANON_KEY
   FPS_LOCAL_URL, FPS_PROD_URL, FPS_SERVICE_TOKEN
   ZABA_LOCAL_URL, ZABA_PROD_URL, ZABA_SERVICE_TOKEN
+  NPD_LOCAL_URL, NPD_PROD_URL, NPD_SERVICE_TOKEN
   QUICKSCAN_MODE
 """
 
@@ -45,6 +48,7 @@ from dotenv import load_dotenv
 
 from scrape_result_transformer import (
     normalize_fps_row,
+    normalize_npd_service_rows,
     normalize_relay_rows,
     normalize_zaba_service_rows,
 )
@@ -83,11 +87,15 @@ ZABA_LOCAL_URL = os.getenv("ZABA_LOCAL_URL", "http://localhost:8788")
 ZABA_PROD_URL = os.getenv("ZABA_PROD_URL", "")
 ZABA_SERVICE_TOKEN = os.getenv("ZABA_SERVICE_TOKEN", "")
 
+NPD_LOCAL_URL = os.getenv("NPD_LOCAL_URL", "http://localhost:8789")
+NPD_PROD_URL = os.getenv("NPD_PROD_URL", "")
+NPD_SERVICE_TOKEN = os.getenv("NPD_SERVICE_TOKEN", "")
+
 UNIVERSAL_SEARCH_URL = f"{SUPABASE_URL}/functions/v1/universal-search" if SUPABASE_URL else ""
 
 QUICKSCAN_SEQUENCE = os.getenv("QUICKSCAN_MODE", "fps,anywho,zabasearch").split(",")
 
-SITE_NAME_MAP = {"anywho": "AnyWho"}  # edge only — zaba is not via universal-search
+SITE_NAME_MAP = {"anywho": "AnyWho"}  # edge only — zaba/npd are not via universal-search
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -317,6 +325,73 @@ class ScraperRunner:
                 "response_time_ms": 0, "response_bytes": 0,
             }]
 
+    async def run_npd(self) -> List[Dict[str, Any]]:
+        """Call npd service.py on serv01/local — same pattern as Zaba (not edge)."""
+        url = NPD_PROD_URL if self.mode == "prod" else NPD_LOCAL_URL
+        if not url:
+            logger.error(
+                f"[{self.scrape_id}] NPD_PROD_URL / NPD_LOCAL_URL not set "
+                "(residential service base URL)"
+            )
+            return [{
+                "scrape_id": self.scrape_id, "target": "npd", "mode": self.mode,
+                "scrape_type": self.scrape_type, "input_data": self.input_data,
+                "summary_results": None, "full_profile_results": None,
+                "errors": "NPD_PROD_URL / NPD_LOCAL_URL not configured",
+                "status": "failed", "response_time_ms": 0, "response_bytes": 0,
+            }]
+
+        endpoint = f"{url.rstrip('/')}/v1/npd/search"
+        body = {
+            "first_name": self.input_data.get("first_name", ""),
+            "last_name": self.input_data.get("last_name", ""),
+            "city": self.input_data.get("city") or None,
+            "state": self.input_data.get("state") or None,
+        }
+        headers = {"Content-Type": "application/json"}
+        if self.mode == "prod" and NPD_SERVICE_TOKEN:
+            headers["Authorization"] = f"Bearer {NPD_SERVICE_TOKEN}"
+
+        logger.info(f"[{self.scrape_id}] POST {endpoint} body={body}")
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(endpoint, json=body, headers=headers)
+                response_time_ms = int(response.elapsed.total_seconds() * 1000)
+                response.raise_for_status()
+                data = response.json()
+                logger.info(
+                    f"[{self.scrape_id}] NPD status={data.get('status')} "
+                    f"count={data.get('count', 0)}"
+                )
+                return normalize_npd_service_rows(
+                    scrape_id=self.scrape_id,
+                    mode=self.mode,
+                    scrape_type=self.scrape_type,
+                    input_data=self.input_data,
+                    npd_response=data,
+                    response_time_ms=response_time_ms,
+                    response_bytes=len(response.content),
+                )
+        except httpx.TimeoutException:
+            logger.error(f"[{self.scrape_id}] NPD timeout")
+            return [{
+                "scrape_id": self.scrape_id, "target": "npd", "mode": self.mode,
+                "scrape_type": self.scrape_type, "input_data": self.input_data,
+                "summary_results": None, "full_profile_results": None,
+                "errors": "timeout after 120s", "status": "timeout",
+                "response_time_ms": 120000, "response_bytes": 0,
+            }]
+        except Exception as e:
+            logger.error(f"[{self.scrape_id}] NPD failed: {e}")
+            return [{
+                "scrape_id": self.scrape_id, "target": "npd", "mode": self.mode,
+                "scrape_type": self.scrape_type, "input_data": self.input_data,
+                "summary_results": None, "full_profile_results": None,
+                "errors": str(e), "status": "failed",
+                "response_time_ms": 0, "response_bytes": 0,
+            }]
+
     async def run(self) -> List[Dict[str, Any]]:
         if self.target == "fps":
             return await self.run_fps()
@@ -324,6 +399,8 @@ class ScraperRunner:
             return await self.run_anywho()
         elif self.target == "zabasearch":
             return await self.run_zabasearch()
+        elif self.target == "npd":
+            return await self.run_npd()
         else:
             raise ValueError(f"Unknown target: {self.target}")
 
@@ -372,7 +449,7 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--target", required=True, choices=["fps", "anywho", "zabasearch", "quickscan"])
+    parser.add_argument("--target", required=True, choices=["fps", "anywho", "zabasearch", "npd", "quickscan"])
     parser.add_argument("--mode", required=True, choices=["local", "prod"])
     parser.add_argument("--type", required=True, choices=["summary", "full", "both"])
     parser.add_argument("--input", nargs="*", default=[])

@@ -1,36 +1,41 @@
 # Scraper Testing Punchlist
 
-## Roadmap (Tasks)
+## Working (production path)
 
-### ZabaSearch Relay
-- [x] Run full test_zabasearch.py suite — **46/46 PASSED**
-- [x] Verify summary search returns expected fields — ✅ ResponseStructure tests
-- [x] Verify full profile search (if applicable) — ✅ FieldExtraction tests
-- [x] Test error handling (invalid inputs, API failures) — ✅ ResponseStructure tests
-- [x] Verify logging integration — Ready (scripts/log_scraper_results.py available)
+### AnyWho
+- [x] Unit suite
+- [x] Live via universal-search / scrape_runner
 
-### Anywho Scraper
-- [x] Run full test_anywho.py suite — **46/46 PASSED**
-- [x] Verify URL building (name, city, state) — ✅ TestBuildUrl tests
-- [x] Verify HTML parsing (person cards) — ✅ TestParseHtml tests
-- [x] Verify blocking detection (Cloudflare, etc.) — ✅ TestIsBlocked tests
-- [x] Test DOM parser and data-content attrs — ✅ TestDomParser tests
-- [x] Test edge cases (unicode, malformed HTML) — ✅ TestEdgeCases tests
+### FPS
+- [x] Residential service serv01 :8787
+- [x] Live scrape_runner prod smoke
 
-### Other Scrapers (Backlog)
-- [ ] Test FPS Playwright scraper
-- [ ] Test NPD reference data
+### Zaba
+- [x] Flame-first curl service workers/zaba :8788
+- [x] Edge refuse residential (deployed)
+- [x] scrape_runner direct to serv01
+- [x] App quick-scan uses VITE_ZABA_SERVICE_URL (not edge)
+- [ ] Public hostname/tunnel for browser users outside Tailscale
+- [ ] Rotate ZABA_SERVICE_TOKEN after paste history
 
-## Issues (Bugs/Blockers)
+### NPD
+- [x] Route probe: DC blocked; serv01 curl 4/5; httpx 0/5; Flame 0/5 → **Route A direct curl**
+- [x] workers/npd FastAPI service (:8789)
+- [x] scrape_runner --target npd
+- [x] Field map via Person JSON-LD → scrape_results transformer
+- [x] Do **not** put live NPD behind Edge (DC CF-blocked)
+- [x] Live smoke on serv01 + scrape_results (constraint allows `npd`)
+- [x] Task Scheduler `NpdScraper` + firewall rule port 8789
+- [ ] Re-probe Flame later (`NPD_USE_FLAME=1`) if residential pool improves
+- [ ] App config `VITE_NPD_SERVICE_URL` (optional, later — mirror Zaba)
 
-### (Open)
-(none identified yet)
+## Issues
+### Open
+- Zaba/FPS/NPD not reachable from public Vercel without tunnel
+- Edge phone-lookup still imports ZabasearchScraper (legacy; separate cleanup)
+- NPD uses host residential IP (Flame blocked on this target) — watch rate limits / IP burn
 
-### (Resolved)
-(none yet)
-
----
-
-## Notes
-- Context initialized 2026-07-28
-- Starting with zabasearch relay testing
+### Closed 2026-08-07
+- Zaba edge 120s timeout (blocked edge route; residential service is source of truth)
+- Personal IP burn on Zaba: Flame-first; ZABA_DIRECT_FALLBACK last resort only
+- NPD route choice: direct curl on serv01 (not Edge, not browser)

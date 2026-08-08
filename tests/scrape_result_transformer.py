@@ -104,6 +104,37 @@ def transform_zaba_service_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def transform_npd_service_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    workers/npd service returns parsed person cards (same shape as zaba):
+      { id, name, age, city_state, phone_snippet, phones[], addresses[],
+        relatives[], aliases[], emails[], detail_link, source }
+    """
+    phones = profile.get("phones") or []
+    phone_numbers = []
+    for p in phones:
+        if isinstance(p, dict) and p.get("number"):
+            phone_numbers.append(p["number"])
+        elif isinstance(p, str):
+            phone_numbers.append(p)
+
+    summary = {
+        "id": profile.get("id"),
+        "name": profile.get("name"),
+        "age": profile.get("age"),
+        "location": profile.get("city_state"),
+        "phone_snippet": profile.get("phone_snippet") or (phone_numbers[0] if phone_numbers else None),
+        "phones": phone_numbers or None,
+        "detail_link": profile.get("detail_link"),
+        "source": profile.get("source") or "NPD",
+    }
+    full_profile = {k: v for k, v in profile.items() if k not in ("status", "error")}
+    return {
+        "summary_results": summary,
+        "full_profile_results": full_profile if full_profile else None,
+    }
+
+
 def normalize_fps_row(
     scrape_id: str,
     mode: str,
@@ -233,6 +264,68 @@ def normalize_zaba_service_rows(
                 "response_time_ms": response_time_ms,
                 "response_bytes": response_bytes,
             })
+    return rows
+
+
+def normalize_npd_service_rows(
+    scrape_id: str,
+    mode: str,
+    scrape_type: str,
+    input_data: Dict[str, Any],
+    npd_response: Dict[str, Any],
+    response_time_ms: int,
+    response_bytes: int,
+) -> List[Dict[str, Any]]:
+    """Build DB row(s) from workers/npd /v1/npd/search response."""
+    raw_status = npd_response.get("status", "failed")
+    profiles = npd_response.get("profiles") or []
+
+    if raw_status == "failed" or (raw_status not in ("success", "no_results") and not profiles):
+        return [{
+            "scrape_id": scrape_id,
+            "target": "npd",
+            "mode": mode,
+            "scrape_type": scrape_type,
+            "input_data": input_data,
+            "summary_results": None,
+            "full_profile_results": None,
+            "errors": npd_response.get("error") or raw_status,
+            "status": "failed",
+            "response_time_ms": response_time_ms,
+            "response_bytes": response_bytes,
+        }]
+
+    if not profiles:
+        return [{
+            "scrape_id": scrape_id,
+            "target": "npd",
+            "mode": mode,
+            "scrape_type": scrape_type,
+            "input_data": input_data,
+            "summary_results": None,
+            "full_profile_results": None,
+            "errors": None,
+            "status": "success",
+            "response_time_ms": response_time_ms,
+            "response_bytes": response_bytes,
+        }]
+
+    rows = []
+    for profile in profiles:
+        transformed = transform_npd_service_profile(profile)
+        rows.append({
+            "scrape_id": scrape_id,
+            "target": "npd",
+            "mode": mode,
+            "scrape_type": scrape_type,
+            "input_data": input_data,
+            "summary_results": transformed["summary_results"] if scrape_type in ("summary", "both") else None,
+            "full_profile_results": transformed["full_profile_results"] if scrape_type in ("full", "both") else None,
+            "errors": None,
+            "status": "success",
+            "response_time_ms": response_time_ms,
+            "response_bytes": response_bytes,
+        })
     return rows
 
 
