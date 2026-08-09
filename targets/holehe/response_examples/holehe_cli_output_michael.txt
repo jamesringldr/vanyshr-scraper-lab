@@ -1,0 +1,143 @@
+Twitter : @palenath
+Github : https://github.com/megadose/holehe
+For BTC Donations : 1FHDM49QfZX6pJmhjLE5tB2K6CaTLMZpXZ
+  0%|          | 0/123 [00:00<?, ?it/s]  4%|▍         | 5/123 [00:00<00:02, 46.67it/s] 30%|███       | 37/123 [00:00<00:00, 201.48it/s]Some characters could not be decoded, and were replaced with REPLACEMENT CHARACTER.
+ 57%|█████▋    | 70/123 [00:00<00:00, 258.60it/s] 79%|███████▉  | 97/123 [00:00<00:00, 194.65it/s]Some characters could not be decoded, and were replaced with REPLACEMENT CHARACTER.
+Some characters could not be decoded, and were replaced with REPLACEMENT CHARACTER.
+ 97%|█████████▋| 119/123 [00:01<00:00, 74.81it/s]100%|██████████| 123/123 [00:10<00:00, 12.08it/s]
+Error occurred while fetching CSRF token: Endpoint not found
+
+
+*************************
+   michael@bertken.com
+*************************
+[x] facebook.com
+[x] about.me
+[x] adobe.com
+[-] amazon.com
+[x] amocrm.com
+[+] any.do
+[-] archive.org
+[-] armurerie-auxerre.com
+[x] atlassian.com
+[-] axonaut.com
+[x] babeshows.co.uk
+[x] badeggsonline.com
+[x] bios-mods.com
+[x] biotechnologyforums.com
+[x] bitmoji.com
+[x] blablacar.com
+[x] blackworldforum.com
+[-] blip.fm
+[x] forum.blitzortung.org
+[x] bluegrassrivals.com
+[-] bodybuilding.com
+[x] buymeacoffee.com
+[x] discussion.cambridge-mt.com
+[-] caringbridge.org
+[x] chinaphonearena.com
+[x] clashfarmer.com
+[x] codecademy.com
+[x] forum.codeigniter.com
+[+] codepen.io
+[-] coroflot.com
+[x] cpaelites.com
+[x] cpahero.com
+[x] cracked.to
+[!] crevado.com
+[!] deliveroo.com
+[x] demonforums.net
+[-] devrant.com
+[-] diigo.com
+[x] discord.com
+[-] docker.com
+[-] dominos.fr
+[+] duolingo.com
+[x] ebay.com
+[x] ello.co
+[-] envato.com
+[+] eventbrite.com
+[!] evernote.com
+[-] fanpop.com
+[-] firefox.com
+[-] flickr.com
+[+] freelancer.com
+[x] drachenhort.user.stunet.tu-freiberg.de
+[x] garmin.com
+[!] github.com
+[x] google.com
+[+] en.gravatar.com / FullName RockChalkMike / https://gravatar.com/mbertken
+[-] hubspot.com
+[x] imgur.com
+[-] insightly.com
+[x] instagram.com
+[x] issuu.com
+[x] forum.kodi.tv
+[x] komoot.com
+[-] laposte.fr
+[!] last.fm
+[+] lastpass.com
+[-] mail.ru
+[-] community.mybb.com
+[x] myspace.com
+[x] nattyornotforum.nattyornot.com
+[-] naturabuy.fr
+[x] forum.ndemiccreations.com
+[x] forums.nextpvr.com
+[x] nike.com
+[x] nimble.com
+[x] nocrm.io
+[x] nutshell.com
+[x] ok.ru
+[+] office365.com
+[x] onlinesequencer.net
+[-] parler.com
+[x] patreon.com
+[!] pinterest.com
+[x] pipedrive.com
+[-] plurk.com
+[x] pornhub.com
+[-] protonmail.ch
+[-] quora.com
+[-] rambler.ru
+[x] redtube.com
+[-] replit.com
+[!] rocketreach.co
+[!] samsung.com
+[-] seoclerks.com
+[x] 7cups.com
+[x] smule.com
+[!] snapchat.com
+[!] soundcloud.com
+[-] sporcle.com
+[+] spotify.com
+[x] strava.com
+[x] strava.com
+[-] taringa.net
+[x] teamleader.eu
+[x] teamtreehouse.com
+[-] tellonym.me
+[x] thecardboard.org
+[x] forums.therian-guide.com
+[x] thevapingforum.com
+[x] tumblr.com
+[x] tunefind.com
+[+] twitter.com
+[x] venmo.com
+[x] vivino.com
+[x] voxmedia.com
+[x] vrbo.com
+[x] vsco.co
+[-] wattpad.com
+[+] wordpress.com
+[x] xing.com
+[-] xnxx.com
+[-] xvideos.com
+[x] yahoo.com
+[-] zoho.com
+
+[+] Email used, [-] Email not used, [x] Rate limit, [!] Error
+123 websites checked in 10.2 seconds
+Twitter : @palenath
+Github : https://github.com/megadose/holehe
+For BTC Donations : 1FHDM49QfZX6pJmhjLE5tB2K6CaTLMZpXZ
