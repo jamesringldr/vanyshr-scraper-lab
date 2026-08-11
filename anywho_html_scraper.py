@@ -102,49 +102,78 @@ class AnyWhoHtmlScraper:
             return None
 
     def _extract_summary_from_html(self, html: str) -> List[SummaryResult]:
-        """Extract multiple summary results from search page HTML"""
+        """Extract multiple results from search page HTML using h2-based structure"""
         soup = BeautifulSoup(html, 'html.parser')
         results = []
 
         try:
-            # AnyWho typically has multiple results - look for result cards
-            result_cards = soup.select(
-                'div[class*="result"], div[class*="person"], '
-                'li[class*="person"], div[class*="card"]'
-            )
+            # AnyWho organizes results by h2 tags containing names
+            # Pattern: h2 (name) -> following siblings with data (age, address, etc)
+            h2_tags = soup.find_all('h2')
 
             seen_names = set()
 
-            for i, card in enumerate(result_cards):
-                # Extract name
-                name_elem = card.select_one('h2, h3, .name, .person-name, a[class*="name"]')
-                if not name_elem:
-                    name_elem = card.select_one('a')
-                name = name_elem.get_text(strip=True) if name_elem else None
+            for h2 in h2_tags:
+                name = h2.get_text(strip=True)
 
-                if not name or name in seen_names or len(name) < 2:
+                # Skip non-name h2 tags (Summary, Numbers, FAQ, etc)
+                if not name or name in seen_names or len(name.split()) < 2:
+                    continue
+                if any(x in name for x in ['Summary', 'Numbers', 'FAQ', 'F.A.Q', 'Filter', 'Area Code', 'Find', 'People']):
+                    continue
+
+                # Additional check: name should only contain letters, spaces, hyphens, apostrophes
+                if not re.match(r"^[A-Za-z\s\-']+$", name):
                     continue
 
                 seen_names.add(name)
 
-                # Extract address
-                addr_elem = card.select_one('[class*="address"], .location, .city-state')
-                address = addr_elem.get_text(strip=True) if addr_elem else ""
+                # Extract data from following h3 sections (Lives in, Phone, Email, etc)
+                address = ""
+                age_text = ""
 
-                # Extract age
-                age_text = card.get_text()
-                age = self._parse_age_from_text(age_text)
+                # Look for specific data sections after this person's h2
+                current = h2
+                section_stop = False
+
+                # Collect text from next 100 siblings to extract data
+                data_text = ""
+                for _ in range(100):
+                    current = current.find_next_sibling()
+                    if not current:
+                        break
+
+                    # Stop if we hit another person h2
+                    if current.name == 'h2':
+                        section_stop = True
+                        break
+
+                    tag_text = current.get_text(strip=True)
+                    data_text += tag_text + " "
+
+                # Extract age from the data (usually right after name as "Age XX")
+                age_match = re.search(r'Age\s+(\d{1,3})', data_text)
+                if age_match:
+                    age_num = int(age_match.group(1))
+                    age_text = str(age_num) if age_num < 150 else ""
+
+                # Extract address from "Lives in:" section
+                lives_in_match = re.search(r'Lives in:([^U]+?)(?:Used to|Phone|$)', data_text)
+                if lives_in_match:
+                    address = lives_in_match.group(1).strip()
+                    # Clean up the address (remove extra spaces)
+                    address = re.sub(r'\s+', ' ', address)[:100]
 
                 summary = SummaryResult(
                     resultId=f"anywho_{len(results)}",
                     fullName=name,
                     address=address,
-                    age=age
+                    ageRange=age_text
                 )
 
                 if summary.fullName:
                     results.append(summary)
-                    if len(results) >= 20:  # AnyWho often returns many results
+                    if len(results) >= 5:  # Limit results
                         break
 
         except Exception as e:
@@ -195,14 +224,14 @@ class AnyWhoHtmlScraper:
                 if email not in profile.emailAddresses:
                     profile.emailAddresses.append(email.lower())
 
-            # Extract relatives
+            # Extract relatives (AnyWho uses familyMembers field)
             rel_section = soup.select_one('[class*="relative"], [class*="family"], [class*="associate"]')
             if rel_section:
                 rel_items = rel_section.select('li, div[class*="member"], [class*="person"]')
                 for item in rel_items[:10]:
                     text = item.get_text(strip=True)
                     if text and len(text) > 2 and len(text) < 100:
-                        profile.relatives.append({"name": text, "relationship": "family"})
+                        profile.familyMembers.append({"name": text, "relationship": "family"})
 
             return profile if profile.fullName else None
 
