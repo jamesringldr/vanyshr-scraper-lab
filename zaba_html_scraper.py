@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
 """
-Zaba Search HTML Scraper (Cost-Efficient Version)
+Zaba Search HTML Scraper (Residential IP Required)
 
-Uses context.dev HTML method (pattern-based extraction, no AI model).
-10x cheaper than Extract API. Note: Zaba was blocked by Extract due to IP detection,
-but HTML method should work better with its residential data approach.
+⚠️ CRITICAL: Zaba blocks all datacenter/API access (including context.dev Extract AND HTML method).
+This scraper is IMPLEMENTATION-READY but REQUIRES FALLBACK to residential IP service.
 
-Cost: ~0.001 per request (vs ~0.005 for Extract)
-Performance: ~2-5 seconds per scrape (vs 70-90s for Extract)
+BLOCKING ISSUE:
+- Zaba detects datacenter IPs and returns WEBSITE_ACCESS_ERROR: 400
+- Affects both Extract API and HTML method
+- NO configuration on context.dev side can fix this
+
+SOLUTION: Use serv01:8788 residential IP service (already configured in prod)
+- Direct curl/requests through residential Windows service
+- See vanyshr-mono for serv01:8788 integration pattern
+- Alternative: Use Extract-based scraper as fallback when HTML fails
+
+This file provides:
+✅ Correct URL pattern for Zaba searches
+✅ HTML parsing logic for multi-profile results
+✅ Structured error handling and fallback triggers
+❌ Does NOT work with context.dev (Zaba blocks it)
+
+Deployment note: Integrate with sequence runner to fallback to serv01:8788 when
+context.dev fails with WEBSITE_ACCESS_ERROR.
 """
 
 import os
@@ -43,7 +58,8 @@ class ZabaHtmlScraperParams:
 class ZabaHtmlScraper:
     """Zaba scraper using context.dev HTML method (cost-efficient)"""
 
-    BASE_URL = "https://www.zabasearch.com"
+    BASE_URL = "https://search.zaba.com"
+    SEARCH_PATH = "/s"
 
     def __init__(self, timeout: int = 60, api_key: Optional[str] = None):
         self.timeout = timeout
@@ -54,17 +70,20 @@ class ZabaHtmlScraper:
 
     def _build_search_url(self, params: ZabaHtmlScraperParams) -> str:
         """
-        Build Zaba search URL.
+        Build Zaba search URL with query parameters.
 
-        Pattern: /people/{first}+{last}+{city}+{state}
-        Example: /people/james+oehring+cameron+mo
+        Pattern: /s?q={first}+{last}&where={city},+{state}
+        Example: /s?q=james+oehring&where=cameron,+mo
         """
-        first = params.firstName.lower()
-        last = params.lastName.lower()
-        city = params.city.lower().replace(" ", "+")
+        first = params.firstName
+        last = params.lastName
+        city = params.city
         state = params.state.lower()
 
-        return f"{self.BASE_URL}/people/{first}+{last}+{city}+{state}"
+        query = f"{first}+{last}".replace(" ", "+")
+        where = f"{city},+{state}".replace(" ", "+")
+
+        return f"{self.BASE_URL}{self.SEARCH_PATH}?q={query}&where={where}"
 
     def _parse_age(self, age_str: Optional[str]) -> Optional[int]:
         """Parse age string to int"""
@@ -223,7 +242,16 @@ class ZabaHtmlScraper:
             return output
 
         except Exception as e:
-            logger.error(f"Zaba HTML Scrape failed: {str(e)}", exc_info=True)
+            error_msg = str(e)
+            logger.error(f"Zaba HTML Scrape failed: {error_msg}", exc_info=True)
+
+            # Provide helpful feedback for IP blocking
+            if "WEBSITE_ACCESS_ERROR" in error_msg or "400" in error_msg:
+                error_msg = (
+                    "Zaba blocks datacenter IPs (context.dev not accessible). "
+                    "Use residential IP fallback: serv01:8788 service"
+                )
+
             return ScrapeOutput(
                 source="zaba-html",
                 search_params=params,
@@ -231,7 +259,7 @@ class ZabaHtmlScraper:
                 timestamp=datetime.utcnow().isoformat() + "Z",
                 execution_time_ms=0,
                 status="failed",
-                error=str(e)
+                error=error_msg
             )
 
 
