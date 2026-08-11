@@ -35,8 +35,8 @@ class NPDScraper:
 
     BASE_URL = "https://nationalpublicdata.com"
 
-    # Schema for context.dev extraction
-    EXTRACT_SCHEMA = {
+    # Schema for listing page extraction
+    LISTING_SCHEMA = {
         "type": "object",
         "properties": {
             "name": {
@@ -49,30 +49,77 @@ class NPDScraper:
             },
             "address": {
                 "type": "string",
-                "description": "Current address (street, city, state, zip)"
+                "description": "Address preview"
             },
             "phone": {
                 "type": "string",
-                "description": "Phone number"
+                "description": "Primary phone number"
             },
-            "email": {
+            "profile_url": {
                 "type": "string",
-                "description": "Email address"
+                "description": "Direct link to full profile"
             },
             "relatives": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Known relatives or family members"
+                "description": "Known relatives"
             },
             "previous_addresses": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Previous addresses lived at"
+                "description": "Previous addresses"
+            }
+        }
+    }
+
+    # Schema for detailed profile extraction
+    PROFILE_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Full name"
+            },
+            "age": {
+                "type": "string",
+                "description": "Age or date of birth"
+            },
+            "address": {
+                "type": "string",
+                "description": "Current address with full details"
+            },
+            "phone": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "All phone numbers"
+            },
+            "email": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "All email addresses"
+            },
+            "relatives": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "All family members"
+            },
+            "previous_addresses": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "All previous addresses"
             },
             "properties": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Real estate properties owned or associated"
+                "description": "All properties"
+            },
+            "occupation": {
+                "type": "string",
+                "description": "Occupation"
+            },
+            "education": {
+                "type": "string",
+                "description": "Education background"
             }
         }
     }
@@ -142,6 +189,26 @@ class NPDScraper:
         if not extracted_data or not extracted_data.get("name"):
             return None
 
+        # Handle phone as either string or array
+        phones = extracted_data.get("phone", [])
+        if isinstance(phones, str):
+            phones = [phones] if phones else []
+        phone_numbers = [
+            {
+                "number": phone,
+                "type": "primary" if i == 0 else "secondary",
+                "status": "current"
+            }
+            for i, phone in enumerate(phones)
+            if phone
+        ]
+
+        # Handle email as either string or array
+        emails = extracted_data.get("email", [])
+        if isinstance(emails, str):
+            emails = [emails] if emails else []
+        email_addresses = [e for e in emails if e]
+
         profile = Profile(
             profileId="npd_" + extracted_data.get("name", "").replace(" ", "_").lower(),
             fullName=extracted_data.get("name", ""),
@@ -155,14 +222,8 @@ class NPDScraper:
                 for addr in (extracted_data.get("previous_addresses") or [])
                 if addr
             ],
-            phoneNumbers=[
-                {
-                    "number": extracted_data.get("phone", ""),
-                    "type": "primary",
-                    "status": "current"
-                }
-            ] if extracted_data.get("phone") else [],
-            emailAddresses=[extracted_data.get("email")] if extracted_data.get("email") else [],
+            phoneNumbers=phone_numbers,
+            emailAddresses=email_addresses,
             relatives=[
                 {"name": rel, "relationship": "family"}
                 for rel in (extracted_data.get("relatives") or [])
@@ -196,21 +257,39 @@ class NPDScraper:
 
             start_time = datetime.utcnow()
 
-            # Build search URL and extract data using context.dev
+            # Step 1: Extract from listing page
             search_url = self._build_search_url(scraper_params)
-            logger.debug(f"Fetching: {search_url}")
+            logger.debug(f"Fetching listing: {search_url}")
 
-            # Extract with optimization:
-            # - maxAgeMs: cache for 24h to avoid redundant API calls for same query
-            result = self.client.web.extract(
+            listing_result = self.client.web.extract(
                 url=search_url,
-                schema=self.EXTRACT_SCHEMA,
+                schema=self.LISTING_SCHEMA,
                 max_age_ms=86400000  # Cache for 24 hours (1 day)
             )
 
-            # Convert extracted data to output models
-            summary_results = self._extract_summary_results(result.data) if result.data else []
-            profile_data = self._extract_profile(result.data) if result.data else None
+            # Convert listing data to summary results
+            summary_results = self._extract_summary_results(listing_result.data) if listing_result.data else []
+
+            # Step 2: Extract from profile page if available
+            profile_data = None
+            if listing_result.data and listing_result.data.get("profile_url"):
+                profile_url = listing_result.data.get("profile_url")
+                logger.debug(f"Fetching profile: {profile_url}")
+                try:
+                    profile_result = self.client.web.extract(
+                        url=profile_url,
+                        schema=self.PROFILE_SCHEMA,
+                        max_age_ms=86400000
+                    )
+                    # Merge listing and profile data, profile takes precedence
+                    merged_data = {**listing_result.data, **profile_result.data} if profile_result.data else listing_result.data
+                    profile_data = self._extract_profile(merged_data)
+                except Exception as e:
+                    logger.warning(f"Profile extraction failed, using listing data only: {e}")
+                    profile_data = self._extract_profile(listing_result.data)
+            else:
+                # No profile URL, use listing data for profile
+                profile_data = self._extract_profile(listing_result.data) if listing_result.data else None
 
             execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
 
