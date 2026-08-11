@@ -267,6 +267,7 @@ class SequenceRunner:
                         age_range=str(summary.age) if hasattr(summary, 'age') and summary.age else "",
                         age=age,
                         location=getattr(summary, 'location', ''),
+                        profile_url=getattr(summary, 'profileUrl', ''),
                     )
                     summary_results.append(sr)
 

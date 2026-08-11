@@ -167,11 +167,18 @@ class FPSHtmlScraper:
                         if addr_link:
                             address = addr_link.get_text(strip=True)
 
+                    # Extract profile URL from the profile link
+                    profile_url = ""
+                    profile_link = card.select_one('h3.card-title a')
+                    if profile_link:
+                        profile_url = profile_link.get('href', '')
+
                     summary = SummaryResult(
                         resultId=f"fps_{len(results)}",
                         fullName=name,
                         address=address,
-                        age=age
+                        age=age,
+                        profileUrl=profile_url
                     )
 
                     results.append(summary)
