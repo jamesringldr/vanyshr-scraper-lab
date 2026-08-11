@@ -132,47 +132,55 @@ class FPSHtmlScraper:
         results = []
 
         try:
-            # FPS search results - look for person cards/rows
-            # Try multiple selectors to be robust to page changes
-            result_cards = soup.select(
-                'div[class*="result"], div[class*="person"], '
-                'a[href*="/name/"], div[data-testid*="result"]'
-            )
-
-            # Deduplicate by extracting unique result sections
-            seen_names = set()
+            # FPS search results - look for card-block divs (actual result cards)
+            # Each card contains: h3.card-title > a > span.larger (name) + span.grey (age/location)
+            result_cards = soup.select('div.card-block')
 
             for card in result_cards:
-                # Extract name
-                name_elem = card.select_one('h2, h3, .name, [class*="name"]')
-                if not name_elem:
-                    name_elem = card
-                name = name_elem.get_text(strip=True) if name_elem else None
+                try:
+                    # Extract name from span.larger inside h3
+                    name_elem = card.select_one('h3.card-title a span.larger')
+                    name = name_elem.get_text(strip=True) if name_elem else None
 
-                if not name or name in seen_names:
-                    continue
+                    if not name or len(name) < 2:
+                        continue
 
-                seen_names.add(name)
+                    # Extract age and location from span.grey (e.g., "Age 61 • Cameron, MO")
+                    grey_elem = card.select_one('h3.card-title a span.grey')
+                    grey_text = grey_elem.get_text(strip=True) if grey_elem else ""
 
-                # Extract address/location
-                addr_elem = card.select_one('[class*="address"], .location, [class*="city"]')
-                address = addr_elem.get_text(strip=True) if addr_elem else ""
+                    age = None
+                    address = ""
 
-                # Extract age if present
-                age_text = card.get_text()
-                age = self._parse_age_from_text(age_text)
+                    if grey_text:
+                        # Parse "Age 61 • Cameron, MO" format
+                        age = self._parse_age_from_text(grey_text)
 
-                summary = SummaryResult(
-                    resultId=f"fps_{len(results)}",
-                    fullName=name,
-                    address=address,
-                    age=age
-                )
+                        # Extract location (after • separator)
+                        if '•' in grey_text:
+                            location_part = grey_text.split('•')[1].strip()
+                            address = location_part
 
-                if summary.fullName:
+                    # Try to get more detailed address from "Past Addresses" section if available
+                    if not address:
+                        addr_link = card.select_one('a[href*="/address/"]')
+                        if addr_link:
+                            address = addr_link.get_text(strip=True)
+
+                    summary = SummaryResult(
+                        resultId=f"fps_{len(results)}",
+                        fullName=name,
+                        address=address,
+                        age=age
+                    )
+
                     results.append(summary)
                     if len(results) >= 5:  # Limit to top 5 results
                         break
+
+                except Exception as e:
+                    logger.debug(f"Error parsing individual card: {e}")
+                    continue
 
         except Exception as e:
             logger.warning(f"Error extracting summary results: {e}")
