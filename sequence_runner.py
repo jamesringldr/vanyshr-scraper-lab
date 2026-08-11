@@ -1,9 +1,17 @@
 """
 Sequence Runner - Main orchestrator for quickscan flow.
-Handles parallel summary scraping and deduplication using HTML-based scrapers.
+Handles two-phase scanning: Summary search with deduplication, then full profile enrichment.
 
-PHASE 1: Parallel summary scraping (HTML method - 10x cheaper/faster than Extract)
-PHASE 2: Deduplication & scoring across brokers
+PHASE 1: Parallel summary scraping & deduplication
+  - Scrape summaries from 4 brokers in parallel (FPS, NPD, AnyWho, Zaba)
+  - Deduplicate using weighted scoring algorithm
+  - Return ranked list of potential matches for user selection
+
+PHASE 2: Full profiles & enrichment (after user selects)
+  - Scrape full profiles from all 4 brokers in parallel
+  - Extract emails and consolidate across brokers
+  - Enrich with Holehe (online services) and Leakcheck (data breaches)
+  - Consolidate into unified profile with deduplication
 """
 
 import asyncio
@@ -35,6 +43,16 @@ from anywho_html_scraper import AnyWhoHtmlScraper
 # Zaba: residential IP service on serv01 (not HTML, IP gets blocked)
 from zaba_residential_scraper import ZabaResidentialScraper
 
+# Phase 2: Full Profiles & Enrichment
+from fps_full_profile_scraper import FPSFullProfileScraper
+from npd_full_profile_scraper import NPDFullProfileScraper
+from anywho_full_profile_scraper import AnyWhoFullProfileScraper
+from zaba_full_profile_scraper import ZabaFullProfileScraper
+from email_extractor import EmailExtractor
+from holehe_enricher import HoleheEnricher
+from leakcheck_enricher import LeakcheckEnricher
+from profile_consolidator import ProfileConsolidator
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,6 +74,20 @@ class SequenceRunner:
         self.use_zaba_residential = use_zaba_residential
         self.dedup_engine = DedupEngine()
 
+        # Phase 2 components
+        self.email_extractor = EmailExtractor()
+        self.holehe_enricher = HoleheEnricher(timeout=timeout)
+        self.leakcheck_enricher = LeakcheckEnricher(timeout=timeout)
+        self.profile_consolidator = ProfileConsolidator()
+
+        # Phase 2 scrapers
+        self.full_profile_scrapers = {
+            BrokerName.FPS: FPSFullProfileScraper(api_key=self.api_key),
+            BrokerName.NPD: NPDFullProfileScraper(api_key=self.api_key),
+            BrokerName.ANYWHO: AnyWhoFullProfileScraper(api_key=self.api_key),
+            BrokerName.ZABA: ZabaFullProfileScraper(),
+        }
+
         # Initialize scrapers
         self.scrapers = {
             BrokerName.FPS: FPSHtmlScraper(api_key=self.api_key, timeout=timeout),
@@ -67,7 +99,8 @@ class SequenceRunner:
 
         logger.info(
             f"SequenceRunner initialized: "
-            f"FPS/NPD/AnyWho (HTML), Zaba (residential serv01)"
+            f"Phase 1 (Summary: FPS/NPD/AnyWho HTML + Zaba residential), "
+            f"Phase 2 (Full profiles + Enrichment ready)"
         )
 
     async def quickscan(self, user_input: QuickScanInput) -> SequenceOutput:
@@ -260,6 +293,98 @@ class SequenceRunner:
                 error=str(e),
                 timing_ms=timing_ms,
             )
+
+    async def full_profile_phase(
+        self, dedup_group, user_input: QuickScanInput
+    ):
+        """
+        Phase 2: Scrape full profiles, extract enrichment data, consolidate.
+
+        Args:
+            dedup_group: Selected DedupGroup from Phase 1
+            user_input: Original search input (for full profile scraping)
+
+        Returns:
+            ConsolidatedProfile with full data and enrichment
+        """
+        start_time = time.time()
+        logger.info(f"Phase 2: Scraping full profiles for {dedup_group.primary_name}")
+
+        # Step 1: Scrape full profiles from all brokers in parallel
+        logger.info("Step 1: Scraping full profiles...")
+        full_profiles = {}
+
+        # Get profile links from dedup group members
+        profile_links = {
+            member.summary.broker.value: member.summary.profile_url
+            for member in dedup_group.members
+            if member.summary.profile_url
+        }
+
+        for broker_name, scraper in self.full_profile_scrapers.items():
+            profile_url = profile_links.get(broker_name.value)
+            if not profile_url:
+                logger.debug(f"No profile URL for {broker_name.value}")
+                continue
+
+            try:
+                if broker_name == BrokerName.ZABA:
+                    # Zaba doesn't have profile URLs, it returns full data directly
+                    # For now, skip full profile scraping for Zaba
+                    continue
+                else:
+                    profile = scraper.scrape_profile(profile_url)
+                    if profile:
+                        full_profiles[broker_name.value] = profile
+
+            except Exception as e:
+                logger.error(f"Error scraping {broker_name} profile: {e}")
+
+        if not full_profiles:
+            logger.warning("No full profiles found")
+            return None
+
+        # Step 2: Extract emails
+        logger.info("Step 2: Extracting emails...")
+        emails = self.email_extractor.extract_from_profiles(full_profiles)
+        logger.info(f"Found {len(emails)} unique emails")
+
+        # Step 3: Enrich with Holehe and Leakcheck
+        logger.info("Step 3: Enriching with services and breach data...")
+        enrichment_data = {
+            "services_found": [],
+            "breaches": [],
+        }
+
+        if emails:
+            # Get first email for enrichment (could do all, but that's slower)
+            primary_email = sorted(emails)[0]
+
+            # Holehe enrichment
+            holehe_result = self.holehe_enricher.enrich_email(primary_email)
+            if holehe_result and holehe_result.get("status") == "success":
+                enrichment_data["services_found"] = holehe_result.get(
+                    "services_found", []
+                )
+
+            # Leakcheck enrichment
+            leakcheck_result = self.leakcheck_enricher.enrich_email(primary_email)
+            if leakcheck_result and leakcheck_result.get("status") == "success":
+                enrichment_data["breaches"] = leakcheck_result.get("breaches", [])
+
+        # Step 4: Consolidate profiles
+        logger.info("Step 4: Consolidating profiles...")
+        consolidated = self.profile_consolidator.consolidate(
+            profiles=full_profiles,
+            person_id=dedup_group.dedup_id,
+            confidence=dedup_group.average_confidence,
+            enrichment_data=enrichment_data,
+        )
+
+        phase2_time_ms = int((time.time() - start_time) * 1000)
+        logger.info(f"Phase 2 complete in {phase2_time_ms}ms")
+
+        return consolidated
 
 
 async def main():
