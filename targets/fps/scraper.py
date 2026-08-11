@@ -1,18 +1,20 @@
 # targets/fps/scraper.py
 """
-FPS (FirstPoint Search) Scraper
+FPS (FastPeopleSearch) Scraper
 
-Pluggable scraper module for vanyshr-mono app.
-Standard interface: scraper.run(params) -> Output
+Uses context.dev Extract API for structured data extraction.
+Standard interface: run(params) -> ScrapeOutput
 """
 
-import asyncio
+import os
 import logging
+import re
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from dataclasses import dataclass, asdict
 
-from .parser import FPSParser
+from context.dev import ContextDev
+
 from .models import ScrapeOutput, SummaryResult, Profile
 
 logger = logging.getLogger(__name__)
@@ -29,25 +31,141 @@ class ScraperParams:
 
 
 class FPSScraper:
-    """FPS scraper implementation"""
+    """FPS scraper using context.dev Extract API for structured extraction"""
 
-    BASE_URL = "https://fps.com"
-    SEARCH_ENDPOINT = f"{BASE_URL}/search"
+    BASE_URL = "https://www.fastpeoplesearch.com"
 
-    def __init__(self, timeout: int = 10):
+    # Schema for context.dev extraction
+    EXTRACT_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Full name of the person"
+            },
+            "age": {
+                "type": "string",
+                "description": "Age or age range"
+            },
+            "address": {
+                "type": "string",
+                "description": "Street address and city/state/zip"
+            },
+            "phone": {
+                "type": "string",
+                "description": "Phone number"
+            },
+            "email": {
+                "type": "string",
+                "description": "Email address"
+            },
+            "relatives": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Known relatives"
+            },
+            "previous_addresses": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Previous addresses lived at"
+            }
+        }
+    }
+
+    def __init__(self, timeout: int = 10, api_key: Optional[str] = None):
         self.timeout = timeout
-        self.parser = FPSParser()
-        self.session = None
+        self.api_key = api_key or os.environ.get("CONTEXT_DEV_API_KEY")
+        if not self.api_key:
+            raise ValueError("CONTEXT_DEV_API_KEY environment variable not set")
+        self.client = ContextDev(api_key=self.api_key)
 
-    async def run(self, params: Dict[str, Any]) -> ScrapeOutput:
+    def _build_search_url(self, params: ScraperParams) -> str:
         """
-        Main entry point for scraping FPS.
+        Build FPS search URL.
+
+        URL pattern: /name/{first}-{last}_{city}-{state}
+        Example: /name/james-oehring_cameron-mo
+        """
+        first = params.firstName.lower()
+        last = params.lastName.lower()
+        city = params.city.lower().replace(" ", "-")
+        state = params.state.lower()
+
+        return f"{self.BASE_URL}/name/{first}-{last}_{city}-{state}"
+
+    def _extract_summary_results(self, extracted_data: Dict[str, Any]) -> List[SummaryResult]:
+        """Convert context.dev extract output to SummaryResult objects"""
+        if not extracted_data or not extracted_data.get("name"):
+            return []
+
+        # Single result from FPS search
+        summary = SummaryResult(
+            resultId="fps_" + extracted_data.get("name", "").replace(" ", "_").lower(),
+            fullName=extracted_data.get("name", ""),
+            address=extracted_data.get("address", ""),
+            age=self._parse_age(extracted_data.get("age")),
+            phone=extracted_data.get("phone", ""),
+            profileUrl=""  # FPS search results don't provide direct profile URL
+        )
+
+        return [summary] if summary.fullName else []
+
+    def _parse_age(self, age_str: Optional[str]) -> Optional[int]:
+        """Parse age string to int"""
+        if not age_str:
+            return None
+        try:
+            # Extract first number from age string (handles "61", "Age 61", "61 years old", etc)
+            digits = re.findall(r'\d+', str(age_str))
+            return int(digits[0]) if digits else None
+        except (ValueError, TypeError):
+            return None
+
+    def _extract_profile(self, extracted_data: Dict[str, Any]) -> Optional[Profile]:
+        """Convert context.dev extract output to Profile object"""
+        if not extracted_data or not extracted_data.get("name"):
+            return None
+
+        profile = Profile(
+            profileId="fps_" + extracted_data.get("name", "").replace(" ", "_").lower(),
+            fullName=extracted_data.get("name", ""),
+            age=self._parse_age(extracted_data.get("age")),
+            currentAddress={
+                "formatted": extracted_data.get("address", "")
+            } if extracted_data.get("address") else {},
+            previousAddresses=[
+                {"formatted": addr}
+                for addr in (extracted_data.get("previous_addresses") or [])
+                if addr
+            ],
+            phoneNumbers=[
+                {
+                    "number": extracted_data.get("phone", ""),
+                    "type": "primary",
+                    "status": "current"
+                }
+            ] if extracted_data.get("phone") else [],
+            emailAddresses=[extracted_data.get("email")] if extracted_data.get("email") else [],
+            relatives=[
+                {"name": rel, "relationship": "family"}
+                for rel in (extracted_data.get("relatives") or [])
+                if rel
+            ],
+            associates=[],
+            properties=[]
+        )
+
+        return profile if profile.fullName else None
+
+    def run(self, params: Dict[str, Any]) -> ScrapeOutput:
+        """
+        Main entry point for scraping FPS using context.dev Extract.
 
         Args:
             params: Dictionary with keys: firstName, lastName, city, state, [timeout]
 
         Returns:
-            ScrapeOutput with summary results and full profile data
+            ScrapeOutput with summary results and profile data
         """
         try:
             # Validate and normalize params
@@ -58,15 +176,19 @@ class FPSScraper:
 
             start_time = datetime.utcnow()
 
-            # Scrape summary results
-            summary_results = await self._scrape_summary(scraper_params)
+            # Build search URL and extract data using context.dev
+            search_url = self._build_search_url(scraper_params)
+            logger.debug(f"Fetching: {search_url}")
 
-            # If results found, scrape first profile for details
-            profile_data = None
-            if summary_results:
-                profile_data = await self._scrape_profile(summary_results[0])
+            result = self.client.web.extract(url=search_url, schema=self.EXTRACT_SCHEMA)
+
+            # Convert extracted data to output models
+            summary_results = self._extract_summary_results(result.data) if result.data else []
+            profile_data = self._extract_profile(result.data) if result.data else None
 
             execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+
+            status = "success" if (summary_results or profile_data) else "no_results"
 
             output = ScrapeOutput(
                 source="fps",
@@ -75,11 +197,11 @@ class FPSScraper:
                 profile=profile_data,
                 timestamp=datetime.utcnow().isoformat() + "Z",
                 execution_time_ms=execution_time_ms,
-                status="success" if summary_results or profile_data else "no_results"
+                status=status
             )
 
             logger.info(f"FPS Scrape completed: {len(summary_results)} results, "
-                       f"{execution_time_ms}ms")
+                       f"{execution_time_ms}ms, status={status}")
 
             return output
 
@@ -96,23 +218,11 @@ class FPSScraper:
                 error=str(e)
             )
 
-    async def _scrape_summary(self, params: ScraperParams) -> List[SummaryResult]:
-        """Scrape summary search results"""
-        # TODO: Implement HTTP request to FPS summary page
-        # Use self.parser.parse_summary_html() to extract results
-        pass
-
-    async def _scrape_profile(self, summary_result: SummaryResult) -> Optional[Profile]:
-        """Scrape full profile from profile URL"""
-        # TODO: Implement HTTP request to FPS profile page
-        # Use self.parser.parse_profile_html() to extract data
-        pass
-
 
 # Standard interface for vanyshr-mono integration
-async def run(params: Dict[str, Any]) -> Dict[str, Any]:
+def run(params: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Standard entry point for vanyshr-mono scraper sequences.
+    Standard entry point for vanyshr scraper sequences.
 
     This function is imported and called by:
     - QuickScan workflow (summary only)
@@ -125,6 +235,6 @@ async def run(params: Dict[str, Any]) -> Dict[str, Any]:
         Dictionary matching ScrapeOutput schema (JSON-serializable)
     """
     scraper = FPSScraper(timeout=params.get("timeout", 10))
-    output = await scraper.run(params)
+    output = scraper.run(params)
     return asdict(output)
 
