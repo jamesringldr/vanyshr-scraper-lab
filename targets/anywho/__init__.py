@@ -14,9 +14,9 @@ Usage:
     })
 """
 
-from .scraper import run, AnywhoScraper
+from .scraper import run, AnyWhoScraper
 from .parser import AnywhoParser
 from .models import ScrapeOutput, Profile, SummaryResult
 
-__all__ = ['run', 'AnywhoScraper', 'AnywhoParser', 'ScrapeOutput', 'Profile', 'SummaryResult']
+__all__ = ['run', 'AnyWhoScraper', 'AnywhoParser', 'ScrapeOutput', 'Profile', 'SummaryResult']
 
