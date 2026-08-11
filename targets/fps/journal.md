@@ -142,8 +142,8 @@ FPS returns fewer fields than NPD/Zaba but still useful for validation.
    - Passed timeout to ContextDev client for proper HTTP handling
 
 2. **API Performance (Context.dev Features)**
-   - Added `useMainContentOnly=True` — Extract only main content, exclude navigation/ads
    - Added `maxAgeMs=86400000` — Cache results for 24 hours (reduces redundant API calls)
+   - Note: `useMainContentOnly` not supported in Extract API (HTML/Markdown endpoints only)
 
 3. **Error Handling**
    - Graceful timeout error handling

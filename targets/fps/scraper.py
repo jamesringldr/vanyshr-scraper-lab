@@ -181,13 +181,11 @@ class FPSScraper:
             search_url = self._build_search_url(scraper_params)
             logger.debug(f"Fetching: {search_url}")
 
-            # Extract with optimizations:
-            # - useMainContentOnly: extract only main content (exclude nav/ads)
+            # Extract with optimization:
             # - maxAgeMs: cache for 24h to avoid redundant API calls for same query
             result = self.client.web.extract(
                 url=search_url,
                 schema=self.EXTRACT_SCHEMA,
-                use_main_content_only=True,  # Extract only main content, exclude nav/ads
                 max_age_ms=86400000  # Cache for 24 hours (1 day)
             )
 
