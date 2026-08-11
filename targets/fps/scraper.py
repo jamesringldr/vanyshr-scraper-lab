@@ -27,7 +27,7 @@ class ScraperParams:
     lastName: str
     city: str
     state: str
-    timeout: int = 10
+    timeout: int = 60  # context.dev Extract takes 10-30s per call
 
 
 class FPSScraper:
@@ -72,12 +72,13 @@ class FPSScraper:
         }
     }
 
-    def __init__(self, timeout: int = 10, api_key: Optional[str] = None):
+    def __init__(self, timeout: int = 60, api_key: Optional[str] = None):
         self.timeout = timeout
         self.api_key = api_key or os.environ.get("CONTEXT_DEV_API_KEY")
         if not self.api_key:
             raise ValueError("CONTEXT_DEV_API_KEY environment variable not set")
-        self.client = ContextDev(api_key=self.api_key)
+        # Pass timeout to ContextDev client (in seconds)
+        self.client = ContextDev(api_key=self.api_key, timeout=timeout)
 
     def _build_search_url(self, params: ScraperParams) -> str:
         """
@@ -180,7 +181,15 @@ class FPSScraper:
             search_url = self._build_search_url(scraper_params)
             logger.debug(f"Fetching: {search_url}")
 
-            result = self.client.web.extract(url=search_url, schema=self.EXTRACT_SCHEMA)
+            # Extract with optimizations:
+            # - useMainContentOnly: extract only main content (exclude nav/ads)
+            # - maxAgeMs: cache for 24h to avoid redundant API calls for same query
+            result = self.client.web.extract(
+                url=search_url,
+                schema=self.EXTRACT_SCHEMA,
+                use_main_content_only=True,  # Extract only main content, exclude nav/ads
+                max_age_ms=86400000  # Cache for 24 hours (1 day)
+            )
 
             # Convert extracted data to output models
             summary_results = self._extract_summary_results(result.data) if result.data else []
