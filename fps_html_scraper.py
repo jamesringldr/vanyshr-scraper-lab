@@ -2,8 +2,13 @@
 """
 FPS HTML Scraper (Cost-Efficient Version)
 
-Uses context.dev HTML method (pattern-based extraction, no AI model).
+Uses context.dev HTML method + JSON-LD structured data extraction.
 10x cheaper than Extract API while maintaining data quality.
+
+Strategy:
+- JSON-LD (Person schema): name, addresses, relatives
+- HTML selectors: phone, email (not in JSON-LD)
+- Hybrid approach: Best of both worlds
 
 Cost: ~0.001 per request (vs ~0.005 for Extract)
 Performance: ~2-5 seconds per scrape (vs 70-90s for Extract)
@@ -13,6 +18,7 @@ import os
 import sys
 import logging
 import re
+import json
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from dataclasses import dataclass, asdict
@@ -94,6 +100,32 @@ class FPSHtmlScraper:
                 return None
         return None
 
+    def _extract_jsonld_person(self, html: str) -> Optional[Dict[str, Any]]:
+        """Extract Person schema from JSON-LD structured data"""
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # Find JSON-LD scripts
+        scripts = soup.find_all('script', type='application/ld+json')
+
+        for script in scripts:
+            content = script.string
+            if not content:
+                continue
+            try:
+                data = json.loads(content)
+                # FPS returns array of schemas
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and item.get('@type') == 'Person':
+                            return item
+                # Or direct object
+                elif isinstance(data, dict) and data.get('@type') == 'Person':
+                    return data
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        return None
+
     def _extract_summary_from_html(self, html: str) -> List[SummaryResult]:
         """Extract summary results from search page HTML using BeautifulSoup"""
         soup = BeautifulSoup(html, 'html.parser')
@@ -148,20 +180,68 @@ class FPSHtmlScraper:
         return results
 
     def _extract_profile_from_html(self, html: str, summary: SummaryResult) -> Optional[Profile]:
-        """Extract full profile from profile page HTML"""
+        """Extract full profile from HTML using JSON-LD + HTML selectors"""
         soup = BeautifulSoup(html, 'html.parser')
 
         try:
-            profile = Profile(
-                profileId=summary.resultId,
-                fullName=summary.fullName,
-                currentAddress={"formatted": summary.address} if summary.address else {}
-            )
+            # Try to extract from JSON-LD first (more reliable)
+            person_data = self._extract_jsonld_person(html)
 
-            # Extract phone numbers using flexible selectors
-            phone_text = soup.get_text()
-            phone_matches = re.findall(r'\(?(\d{3})\)?[-.\s]?(\d{3})[-.\s]?(\d{4})', phone_text)
-            for match in phone_matches[:3]:  # Limit to 3 phones
+            if person_data:
+                # Extract from JSON-LD
+                name = person_data.get('name', summary.fullName)
+
+                # Extract addresses from homeLocation
+                current_address = {}
+                previous_addresses = []
+                home_locations = person_data.get('homeLocation', [])
+
+                if home_locations:
+                    for i, loc in enumerate(home_locations):
+                        if isinstance(loc, dict):
+                            desc = loc.get('description', '').lower()
+                            addr_obj = loc.get('address', {})
+                            if isinstance(addr_obj, dict):
+                                street = addr_obj.get('streetAddress', '')
+                                city = addr_obj.get('addressLocality', '')
+                                state = addr_obj.get('addressRegion', '')
+                                formatted = f"{street}, {city}, {state}".strip()
+
+                                if i == 0 or 'recent' in desc or 'current' in desc:
+                                    current_address = {"formatted": formatted} if formatted else {}
+                                else:
+                                    if formatted:
+                                        previous_addresses.append({"formatted": formatted})
+
+                # Extract relatives from JSON-LD
+                relatives = []
+                related_to = person_data.get('relatedTo', [])
+                if isinstance(related_to, list):
+                    for rel in related_to:
+                        if isinstance(rel, dict) and 'name' in rel:
+                            relatives.append({"name": rel['name'], "relationship": "family"})
+
+                profile = Profile(
+                    profileId=summary.resultId,
+                    fullName=name,
+                    currentAddress=current_address,
+                    previousAddresses=previous_addresses,
+                    relatives=relatives
+                )
+            else:
+                # Fallback to basic summary data
+                profile = Profile(
+                    profileId=summary.resultId,
+                    fullName=summary.fullName,
+                    currentAddress={"formatted": summary.address} if summary.address else {}
+                )
+
+            # Extract phone/email from HTML (not in JSON-LD)
+            page_text = soup.get_text()
+
+            # Extract phone numbers
+            phone_matches = re.findall(r'\(?(\d{3})\)?[-.\s]?(\d{3})[-.\s]?(\d{4})', page_text)
+            for match in phone_matches[:3]:
                 phone_num = f"({match[0]}) {match[1]}-{match[2]}"
                 profile.phoneNumbers.append({
                     "number": phone_num,
@@ -170,19 +250,10 @@ class FPSHtmlScraper:
                 })
 
             # Extract email addresses
-            email_matches = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', phone_text)
-            for email in email_matches[:3]:  # Limit to 3 emails
+            email_matches = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', page_text)
+            for email in email_matches[:3]:
                 if email not in profile.emailAddresses:
                     profile.emailAddresses.append(email.lower())
-
-            # Extract relatives from family section
-            rel_section = soup.select_one('[class*="relative"], [class*="family"], [class*="associate"]')
-            if rel_section:
-                rel_items = rel_section.select('li, div[class*="member"], [class*="person"]')
-                for item in rel_items[:10]:
-                    text = item.get_text(strip=True)
-                    if text and len(text) > 2 and len(text) < 100:
-                        profile.relatives.append({"name": text, "relationship": "family"})
 
             return profile if profile.fullName else None
 
