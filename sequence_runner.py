@@ -14,6 +14,11 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from dotenv import load_dotenv
+
+# Load .env.local if it exists
+load_dotenv('.env.local')
+
 # Add sequence worktree for HTML scrapers
 sys.path.insert(0, str(Path(__file__).parent))
 
