@@ -3,7 +3,7 @@
 NPD (National Public Data) HTML Scraper (Cost-Efficient Version)
 
 Uses context.dev HTML method (pattern-based extraction, no AI model).
-10x cheaper than Extract API while maintaining data quality.
+Leverages JSON-LD structured data for robust extraction.
 
 Cost: ~0.001 per request (vs ~0.005 for Extract)
 Performance: ~2-5 seconds per scrape (vs 70-90s for Extract)
@@ -13,6 +13,7 @@ import os
 import sys
 import logging
 import re
+import json
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from dataclasses import dataclass, asdict
@@ -104,51 +105,77 @@ class NPDHtmlScraper:
         except (ValueError, TypeError):
             return None
 
-    def _extract_summary_from_html(self, html: str) -> List[SummaryResult]:
-        """Extract summary results from search page HTML"""
+    def _extract_jsonld_person(self, html: str) -> Optional[Dict[str, Any]]:
+        """Extract Person schema from JSON-LD structured data"""
         soup = BeautifulSoup(html, 'html.parser')
+
+        # Find JSON-LD scripts
+        scripts = soup.find_all('script', type='application/ld+json')
+
+        for script in scripts:
+            content = script.string
+            if not content:
+                continue
+            try:
+                data = json.loads(content)
+                if data.get('@type') == 'Person':
+                    return data
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        return None
+
+    def _extract_summary_from_html(self, html: str) -> List[SummaryResult]:
+        """Extract summary results from NPD HTML using JSON-LD structured data"""
         results = []
 
         try:
-            # NPD search results - look for result rows/cards
-            result_cards = soup.select(
-                'div[class*="result"], tr[class*="person"], '
-                'div[class*="record"], li[class*="match"]'
+            # NPD pages contain Person schema JSON-LD with all data
+            person_data = self._extract_jsonld_person(html)
+
+            if not person_data:
+                logger.warning("No Person JSON-LD data found")
+                return results
+
+            # Extract basic info
+            name = person_data.get('name')
+            if not name:
+                return results
+
+            # Extract current address
+            home_locations = person_data.get('HomeLocation', [])
+            current_address = ""
+            if home_locations:
+                # First location is typically current
+                loc = home_locations[0]
+                if isinstance(loc, dict):
+                    addr = loc.get('address', {})
+                    if isinstance(addr, dict):
+                        street = addr.get('streetAddress', '')
+                        city = addr.get('addressLocality', '')
+                        state = addr.get('addressRegion', '')
+                        zip_code = addr.get('postalCode', '')
+                        current_address = f"{street}, {city}, {state} {zip_code}".strip()
+
+            # Extract age from birthDate
+            birth_date = person_data.get('birthDate')
+            age = None
+            if birth_date:
+                try:
+                    birth_year = int(birth_date)
+                    age = datetime.now().year - birth_year
+                except (ValueError, TypeError):
+                    pass
+
+            # Create summary result (using correct NPD field names)
+            summary = SummaryResult(
+                resultId="npd_0",
+                fullName=name,
+                addressPreview=current_address,
+                phonePreview=person_data.get('telephone', [None])[0] if person_data.get('telephone') else ""
             )
 
-            seen_names = set()
-
-            for i, card in enumerate(result_cards):
-                # Extract name
-                name_elem = card.select_one('h2, h3, .name, .person-name, [class*="name"]')
-                if not name_elem:
-                    name_elem = card.select_one('a')
-                name = name_elem.get_text(strip=True) if name_elem else None
-
-                if not name or name in seen_names or len(name) < 2:
-                    continue
-
-                seen_names.add(name)
-
-                # Extract address
-                addr_elem = card.select_one('[class*="address"], .location, .city-state')
-                address = addr_elem.get_text(strip=True) if addr_elem else ""
-
-                # Extract age
-                age_text = card.get_text()
-                age = self._parse_age_from_text(age_text)
-
-                summary = SummaryResult(
-                    resultId=f"npd_{len(results)}",
-                    fullName=name,
-                    address=address,
-                    age=age
-                )
-
-                if summary.fullName:
-                    results.append(summary)
-                    if len(results) >= 5:
-                        break
+            results.append(summary)
 
         except Exception as e:
             logger.warning(f"Error extracting summary results: {e}")
@@ -180,42 +207,100 @@ class NPDHtmlScraper:
         return None
 
     def _extract_profile_from_html(self, html: str, summary: SummaryResult) -> Optional[Profile]:
-        """Extract full profile from profile page HTML"""
-        soup = BeautifulSoup(html, 'html.parser')
+        """Extract full profile from NPD HTML using JSON-LD structured data"""
 
         try:
-            profile = Profile(
-                profileId=summary.resultId,
-                fullName=summary.fullName,
-                age=summary.age,
-                currentAddress={"formatted": summary.address} if summary.address else {}
-            )
+            person_data = self._extract_jsonld_person(html)
 
-            # Extract phone numbers using flexible selectors
-            phone_text = soup.get_text()
-            phone_matches = re.findall(r'\(?(\d{3})\)?[-.\s]?(\d{3})[-.\s]?(\d{4})', phone_text)
-            for match in phone_matches[:3]:
-                phone_num = f"({match[0]}) {match[1]}-{match[2]}"
-                profile.phoneNumbers.append({
-                    "number": phone_num,
-                    "type": "primary" if len(profile.phoneNumbers) == 0 else "secondary",
+            if not person_data:
+                # Fallback to summary data
+                return Profile(
+                    profileId=summary.resultId,
+                    fullName=summary.fullName,
+                    age=summary.age,
+                    currentAddress={"formatted": summary.address} if summary.address else {}
+                )
+
+            name = person_data.get('name', summary.fullName)
+
+            # Extract current address
+            home_locations = person_data.get('HomeLocation', [])
+            current_address = {}
+            if home_locations and isinstance(home_locations[0], dict):
+                addr = home_locations[0].get('address', {})
+                if isinstance(addr, dict):
+                    street = addr.get('streetAddress', '')
+                    city = addr.get('addressLocality', '')
+                    state = addr.get('addressRegion', '')
+                    zip_code = addr.get('postalCode', '')
+                    formatted = f"{street}, {city}, {state} {zip_code}".strip()
+                    current_address = {"formatted": formatted}
+
+            # Extract previous addresses
+            previous_addresses = []
+            if len(home_locations) > 1:
+                for loc in home_locations[1:]:
+                    if isinstance(loc, dict):
+                        addr = loc.get('address', {})
+                        if isinstance(addr, dict):
+                            street = addr.get('streetAddress', '')
+                            city = addr.get('addressLocality', '')
+                            state = addr.get('addressRegion', '')
+                            zip_code = addr.get('postalCode', '')
+                            formatted = f"{street}, {city}, {state} {zip_code}".strip()
+                            if formatted:
+                                previous_addresses.append({"formatted": formatted})
+
+            # Extract age from birthDate
+            birth_date = person_data.get('birthDate')
+            age = None
+            if birth_date:
+                try:
+                    birth_year = int(birth_date)
+                    age = datetime.now().year - birth_year
+                except (ValueError, TypeError):
+                    pass
+
+            # Extract phone numbers from JSON-LD
+            phones_data = person_data.get('telephone', [])
+            phone_numbers = []
+            for i, phone in enumerate(phones_data[:3]):
+                # Format phone (remove non-digits then format)
+                digits = re.sub(r'\D', '', str(phone))
+                if len(digits) == 10:
+                    formatted = f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+                else:
+                    formatted = phone
+                phone_numbers.append({
+                    "number": formatted,
+                    "type": "primary" if i == 0 else "secondary",
                     "status": "current"
                 })
 
-            # Extract email addresses
-            email_matches = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', phone_text)
-            for email in email_matches[:3]:
-                if email not in profile.emailAddresses:
-                    profile.emailAddresses.append(email.lower())
+            # Extract emails from JSON-LD
+            email_addresses = person_data.get('email', [])
+            email_addresses = [e.lower() for e in email_addresses if isinstance(e, str)][:5]
 
-            # Extract relatives
-            rel_section = soup.select_one('[class*="relative"], [class*="family"], [class*="associate"]')
-            if rel_section:
-                rel_items = rel_section.select('li, div[class*="member"], [class*="person"]')
-                for item in rel_items[:10]:
-                    text = item.get_text(strip=True)
-                    if text and len(text) > 2 and len(text) < 100:
-                        profile.relatives.append({"name": text, "relationship": "family"})
+            # Extract relatives from JSON-LD
+            relatives = []
+            related_to = person_data.get('relatedTo', [])
+            if isinstance(related_to, list):
+                for rel in related_to:
+                    if isinstance(rel, dict) and 'name' in rel:
+                        relatives.append({"name": rel['name'], "relationship": "family"})
+            elif isinstance(related_to, dict) and 'name' in related_to:
+                relatives.append({"name": related_to['name'], "relationship": "family"})
+
+            profile = Profile(
+                profileId=summary.resultId,
+                fullName=name,
+                age=age,
+                currentAddress=current_address,
+                previousAddresses=previous_addresses,
+                phoneNumbers=phone_numbers,
+                emailAddresses=email_addresses,
+                relatives=relatives
+            )
 
             return profile if profile.fullName else None
 
