@@ -12,6 +12,16 @@ from typing import Dict, List, Any, Optional
 
 
 @dataclass
+class SummaryResult:
+    """Single result from summary search (for residential scraper)"""
+    resultId: str
+    fullName: str
+    address: str
+    age: Optional[int] = None
+    profileUrl: str = ""
+
+
+@dataclass
 class Profile:
     """Full person profile (all results are full profiles on Zaba)"""
     profileId: str
