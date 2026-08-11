@@ -68,10 +68,22 @@ class NPDFullProfileScraper:
         try:
             profile = Profile(profileId=profile_id)
 
-            # Extract name (usually in h1 or page title)
-            name_elem = soup.select_one("h1, .profile-name, [class*='name']")
+            # Extract name - try multiple patterns
+            name_elem = soup.select_one("h3.card-title a span.larger, h1, .profile-name, [class*='name']")
             if name_elem:
-                profile.fullName = name_elem.get_text(strip=True)
+                full_text = name_elem.get_text(strip=True)
+                # Clean up: extract just the name part (before location info)
+                import re as regex
+                # Match: FirstName LastName (stops at location separators)
+                name_match = regex.match(r'^([A-Za-z\s\-\.\']+?)(?:\s*[,(]|\s+in\s+)', full_text)
+                if name_match:
+                    profile.fullName = name_match.group(1).strip()
+                else:
+                    # Fallback: split on common separators
+                    for sep in ['(', ',']:
+                        if sep in full_text:
+                            full_text = full_text.split(sep)[0].strip()
+                    profile.fullName = full_text
 
             # Extract age
             age_text = soup.get_text()
@@ -115,7 +127,26 @@ class NPDFullProfileScraper:
         """Extract email addresses from HTML"""
         email_pattern = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
         emails = set(re.findall(email_pattern, html.lower()))
-        return emails
+
+        # Filter out system/service emails
+        system_domains = {
+            'nationalpublicdata.com',
+            'support@',
+            'noreply@',
+            'no-reply@',
+            'admin@',
+            'info@',
+            'notifications@',
+        }
+
+        filtered = set()
+        for email in emails:
+            # Skip if it's a system email
+            if any(domain in email for domain in system_domains):
+                continue
+            filtered.add(email)
+
+        return filtered
 
     def _extract_phones(self, html: str) -> List[str]:
         """Extract phone numbers from HTML"""
@@ -141,10 +172,20 @@ class NPDFullProfileScraper:
         current_address = {}
         previous_addresses = []
 
-        address_sections = soup.select('[class*="address"], [class*="location"]')
+        # Try multiple selectors to handle page structure variations
+        address_links = soup.select('a[href*="/address/"], [class*="address"] a')
 
-        for i, section in enumerate(address_sections[:5]):
-            addr_text = section.get_text(strip=True)
+        if not address_links:
+            # Fallback: look for any divs with address-like content
+            address_sections = soup.select('[class*="address"], [class*="location"]')
+        else:
+            address_sections = address_links
+
+        for i, section in enumerate(address_sections[:5]):  # Limit to 5 addresses
+            if isinstance(section, str):
+                addr_text = section
+            else:
+                addr_text = section.get_text(strip=True)
 
             if not addr_text or len(addr_text) < 5:
                 continue
