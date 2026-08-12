@@ -178,7 +178,11 @@ class FPSHtmlScraper:
                         fullName=name,
                         address=address,
                         age=age,
-                        profileUrl=profile_url
+                        phone="",
+                        profileUrl=profile_url,
+                        email="",
+                        aliases="",
+                        relatives=""
                     )
 
                     results.append(summary)

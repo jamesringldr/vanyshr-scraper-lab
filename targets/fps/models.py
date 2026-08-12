@@ -17,6 +17,9 @@ class SummaryResult:
     age: Optional[int] = None
     phone: str = ""
     profileUrl: str = ""
+    email: str = ""
+    aliases: str = ""
+    relatives: str = ""
 
 
 @dataclass

@@ -26,6 +26,10 @@ class SummaryResult:
     age: Optional[int] = None  # Parsed integer
     location: str = ""
     profile_url: str = ""
+    phone: str = ""  # Comma-separated phone numbers
+    email: str = ""  # Comma-separated emails
+    aliases: str = ""  # Comma-separated aliases/AKAs
+    relatives: str = ""  # Comma-separated relative names
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON"""
@@ -37,6 +41,10 @@ class SummaryResult:
             'age': self.age,
             'location': self.location,
             'profile_url': self.profile_url,
+            'phone': self.phone,
+            'email': self.email,
+            'aliases': self.aliases,
+            'relatives': self.relatives,
         }
 
 

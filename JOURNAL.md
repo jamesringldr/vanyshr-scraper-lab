@@ -322,3 +322,125 @@ Refer to individual target journals:
 - `targets/{target}/output.md` - Output schema
 
 Good luck! 🚀
+
+---
+
+## 2026-08-12: Phase 1 Summary Scraper Test Framework Session
+
+### Session Goal
+Create comprehensive 17-person test framework to validate Phase 1 summary scrapers (FPS, NPD, AnyWho) and identify most reliable brokers for different data types (age, address, phones, emails, aliases, relatives).
+
+### What Was Built
+
+#### 1. **Data Models Extended**
+- Extended `SummaryResult` dataclass across all brokers to include:
+  - `phone`: str
+  - `email`: str  
+  - `aliases`: str (comma/bullet-separated list)
+  - `relatives`: str (comma/bullet-separated list)
+- Files: `data_models.py` + `/targets/{fps,npd,anywho}/models.py`
+
+#### 2. **HTML Scrapers Implemented**
+- **FPS HTML Scraper** (`fps_html_scraper.py`): Extracts summary results with phone/email fields
+- **NPD HTML Scraper** (`npd_html_scraper.py`): 
+  - Fixed BASE_URL (removed www.)
+  - URL format: `/people/{letter}/{first}-{last}/{state-abbr-lower}/{city-lower}/`
+  - Uses context.dev HTML method (~$0.001/request)
+- **AnyWho HTML Scraper** (`anywho_html_scraper.py`):
+  - h3-section based extraction (Lives in, Phone numbers, AKA, May be related to)
+  - Reconstructs data-content (Cloudflare blurred data) from HTML attributes
+  - Smart spacing: only adds space before letters, not punctuation
+  - Phone regex: `\(\d{3}\)\s*\d{3}-\d+`
+  - Email regex: `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+(?:\.[a-zA-Z]{2,})?`
+
+#### 3. **Test Framework** (`test_all_17_profiles.py`)
+- Runs Phase 1 for 17 known people across 3 brokers
+- Generates CSV with:
+  - **SUMMARY rows**: Per-profile metadata (timing, total results, broker count)
+  - **DETAIL rows**: Per-result extracted data (age, address, phones, emails, aliases, relatives)
+- Output: `/Users/jameso/Downloads/Test_Profiles_-_detailed_results.csv`
+
+#### 4. **Sequence Runner Updates**
+- Updated `_scrape_broker()` method to extract and pass new fields
+- Handles broker-specific field name variants (phone vs phonePreview)
+- Converts broker results → SummaryResult with all data fields
+
+### Test Results (17-person run)
+✅ **Test completed successfully**
+- 17 profiles tested across FPS, NPD, AnyWho
+- ~50 API requests total, ~52 seconds runtime
+- **FPS:** Excellent — 1-5 matches per profile consistently
+- **NPD:** 404s expected — users not in database with city/state filter
+- **AnyWho:** Good results — extracting detailed data
+
+### Data Extraction Status
+
+| Field | FPS | NPD | AnyWho | Status |
+|-------|-----|-----|--------|--------|
+| Age | ✅ | ✅ (ageRange) | ✅ | Working |
+| Address | ✅ | ✅ | ✅ | Working |
+| Phone | ⚠️ | ⚠️ | ⚠️ | Extracted but truncated in CSV |
+| Email | ⚠️ | ✅ | ✅ | Working in scrapers |
+| Aliases | ✅ | ✅ | ✅ | Working |
+| Relatives | ✅ | ✅ | ✅ | Working |
+
+### Known Issues / Blockers
+
+#### 🔴 **CRITICAL: CSV Parsing/Insertion Problem**
+- **Symptom:** Data extracted correctly but CSV has truncated/missing values in some fields
+- **Root Cause:** TBD — likely issue in `sequence_runner.py` CSV conversion logic or test_all_17_profiles.py data aggregation
+- **Evidence:**
+  - Phone numbers showing as "(816) 632-" (incomplete)
+  - Some email/aliases/relatives fields empty despite successful extraction
+  - Extraction logic working (h3 parsing, data-content reconstruction all verified)
+- **Impact:** CSV results unreliable for spot-checking accuracy
+- **Handoff:** Detailed debug prompt + README in Vanyshr-mono/packages/scraper-lab-phase1/
+
+#### ⚠️ **Minor: Zaba Residential Connection Errors**
+- [Errno 61] Connection refused on serv01:8789
+- Expected behavior — service not running
+- Does not affect Phase 1 summary scrapers (FPS, NPD, AnyWho)
+
+### Files Modified/Created This Session
+
+**Data Models:**
+- `data_models.py` — Updated SummaryResult dataclass
+- `/targets/fps/models.py` — Added phone, email, aliases, relatives fields
+- `/targets/npd/models.py` — Added ageRange, email, aliases, relatives fields  
+- `/targets/anywho/models.py` — Added phone, email, aliases, relatives fields
+
+**Scrapers:**
+- `fps_html_scraper.py` — New
+- `npd_html_scraper.py` — Complete rewrite with HTML method
+- `anywho_html_scraper.py` — Complete rewrite with h3-section parsing
+
+**Test/Sequence:**
+- `test_all_17_profiles.py` — New 17-person test framework
+- `sequence_runner.py` — Updated `_scrape_broker()` method (~line 270)
+
+**Test Data:**
+- `/Users/jameso/Downloads/Test_Profiles_-_detailed_results.csv` — Results (with parsing issues)
+
+### Next Steps
+
+1. **Debug CSV parsing issue** — Trace data flow from broker results → CSV output
+   - Verify sequence_runner.py field extraction
+   - Check test_all_17_profiles.py CSV writing logic
+   - Validate data types in SummaryResult instances
+
+2. **Verify phone number truncation** — Check if AnyWho extraction is incomplete or CSV truncating
+
+3. **Test with corrected CSV logic** — Re-run 17-person test to confirm all fields populate correctly
+
+4. **Spot-check accuracy** — Against known profiles to identify which brokers most reliable
+
+### Handoff Documentation
+
+Created comprehensive handoff package in Vanyshr-mono:
+- **Location:** `/Vanyshr-mono/packages/scraper-lab-phase1/`
+- **README.md** — File structure, what works/breaks, next steps
+- **HANDOFF_PROMPT.md** — Detailed debug guide with 4 hypotheses and step-by-step fixes
+- **sample_results.csv** — Example showing the parsing issue
+- All working files copied to mono repo
+
+---

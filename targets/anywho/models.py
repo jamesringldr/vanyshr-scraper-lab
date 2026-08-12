@@ -17,6 +17,10 @@ class SummaryResult:
     ageRange: str = ""
     location: str = ""
     profileUrl: str = ""
+    phone: str = ""
+    email: str = ""
+    aliases: str = ""
+    relatives: str = ""
 
 
 @dataclass

@@ -17,6 +17,10 @@ class SummaryResult:
     phonePreview: str = ""
     matchScore: int = 0
     profileUrl: str = ""
+    ageRange: str = ""
+    email: str = ""
+    aliases: str = ""
+    relatives: str = ""
 
 
 @dataclass

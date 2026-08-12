@@ -260,14 +260,25 @@ class SequenceRunner:
                             age = None
 
                     from data_models import SummaryResult as SR
+                    # Get age_range from either 'age' (FPS) or 'ageRange' (NPD, AnyWho) field
+                    age_range_str = ""
+                    if hasattr(summary, 'age') and summary.age:
+                        age_range_str = str(summary.age)
+                    elif hasattr(summary, 'ageRange') and summary.ageRange:
+                        age_range_str = str(summary.ageRange)
+
                     sr = SR(
                         broker=broker,
                         full_name=summary.fullName,
                         address=getattr(summary, 'address', getattr(summary, 'addressPreview', '')),
-                        age_range=str(summary.age) if hasattr(summary, 'age') and summary.age else "",
+                        age_range=age_range_str,
                         age=age,
                         location=getattr(summary, 'location', ''),
                         profile_url=getattr(summary, 'profileUrl', ''),
+                        phone=getattr(summary, 'phone', getattr(summary, 'phonePreview', '')),
+                        email=getattr(summary, 'email', ''),
+                        aliases=getattr(summary, 'aliases', ''),
+                        relatives=getattr(summary, 'relatives', ''),
                     )
                     summary_results.append(sr)
 

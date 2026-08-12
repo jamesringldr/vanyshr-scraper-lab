@@ -43,7 +43,7 @@ class NPDHtmlScraperParams:
 class NPDHtmlScraper:
     """NPD scraper using context.dev HTML method (cost-efficient)"""
 
-    BASE_URL = "https://www.nationalpublicdata.com"
+    BASE_URL = "https://nationalpublicdata.com"  # No www.
 
     # State abbreviation mapping
     STATE_ABBR = {
@@ -78,18 +78,20 @@ class NPDHtmlScraper:
 
     def _build_search_url(self, params: NPDHtmlScraperParams) -> str:
         """
-        Build NPD search URL.
+        Build NPD search URL using path-based routing.
 
-        Pattern: /people/{letter}/{first}-{last}/{state-abbr}/{city}
-        Example: /people/O/James-Oehring/MO/Cameron
+        Pattern: /people/{letter}/{first}-{last}/{state-abbr-lower}/{city-lower}/
+        Example: /people/o/james-oehring/mo/cameron/
+
+        Correct format: everything lowercase, hyphens in names and cities, trailing slash.
         """
-        first = params.firstName.capitalize()
-        last = params.lastName.capitalize()
-        state_abbr = self._get_state_abbr(params.state)
-        city = params.city.capitalize()
-        letter = last[0].upper()
+        first = params.firstName.lower()
+        last = params.lastName.lower()
+        state_abbr = self._get_state_abbr(params.state).lower()
+        city = params.city.lower().replace(" ", "-")
+        letter = last[0].lower()
 
-        return f"{self.BASE_URL}/people/{letter}/{first}-{last}/{state_abbr}/{city}"
+        return f"{self.BASE_URL}/people/{letter}/{first}-{last}/{state_abbr}/{city}/"
 
     def _parse_age(self, age_str: Optional[str]) -> Optional[int]:
         """Parse age string to int"""
@@ -169,14 +171,33 @@ class NPDHtmlScraper:
                 if link:
                     profile_url = link.get('href', '')
 
+                # Try to extract full address from parent card (look for street address pattern)
+                full_address = location  # Default to city, state
+                phone_str = ""
+                email_str = ""
+                aliases_str = ""
+                relatives_str = ""
+
+                # Search for address details in the card
+                if parent:
+                    card_text = parent.get_text()
+                    # Look for street address pattern (e.g., "128 Main St")
+                    street_match = re.search(r'(\d+\s+[A-Za-z\s]+(?:St|Ave|Rd|Dr|Ln|Way|Court|Blvd)\.?[,\s]+[\w\s,]+(?:MO|KS|CO|NY|TX|CA|FL|IL|OH|PA|MI|NC|GA|VA|WA|AZ|TN|LA|IN|MA|MD|MN|NV|NM|NJ|CT|SC|AL|OK|KY|UT|IA|AR|MS|NE|ID|ME|NH|VT|RI|WY|MT|DE|WV|DC|HI|AK|GU|PR|VI|AS|MH|MP|PW)\s+\d{5})', card_text)
+                    if street_match:
+                        full_address = street_match.group(1)
+
                 # Create summary result
                 summary = SummaryResult(
                     resultId=f"npd_{len(results)}",
                     fullName=name,
-                    address=location,  # "City, State" from parsed text
-                    ageRange=str(age) if age else "",
-                    age=age,
-                    profileUrl=profile_url  # type: ignore
+                    addressPreview=full_address,  # Full address or city/state
+                    phonePreview=phone_str,
+                    matchScore=100,
+                    profileUrl=profile_url,
+                    ageRange=age_str if age else "",  # Pass the age string
+                    email=email_str,
+                    aliases=aliases_str,
+                    relatives=relatives_str
                 )
 
                 results.append(summary)
@@ -360,8 +381,8 @@ class NPDHtmlScraper:
                     profile_data = Profile(
                         profileId=summary_results[0].resultId,
                         fullName=summary_results[0].fullName,
-                        age=summary_results[0].age,
-                        currentAddress={"formatted": summary_results[0].address} if summary_results[0].address else {}
+                        age=None,
+                        currentAddress={"formatted": summary_results[0].addressPreview} if summary_results[0].addressPreview else {}
                     )
                 except Exception as e:
                     logger.debug(f"Could not create profile from summary: {e}")
