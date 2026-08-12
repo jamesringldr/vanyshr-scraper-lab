@@ -126,56 +126,64 @@ class NPDHtmlScraper:
         return None
 
     def _extract_summary_from_html(self, html: str) -> List[SummaryResult]:
-        """Extract summary results from NPD HTML using JSON-LD structured data"""
+        """Extract multiple result cards from NPD search page HTML
+
+        NPD search results display as h2 tags with pattern: "Name, Age City, State"
+        Each result card is wrapped in a parent div with class 'name-cards-head'
+        """
+        soup = BeautifulSoup(html, 'html.parser')
         results = []
 
         try:
-            # NPD pages contain Person schema JSON-LD with all data
-            person_data = self._extract_jsonld_person(html)
+            # Find all h2 tags
+            h2_tags = soup.find_all('h2')
 
-            if not person_data:
-                logger.warning("No Person JSON-LD data found")
-                return results
+            for h2 in h2_tags:
+                # Check if this h2 is a result card (has name-cards-head parent)
+                parent = h2.find_parent(class_='name-cards-head')
+                if not parent:
+                    continue  # Skip non-result h2s (FAQ, Background Report, etc)
 
-            # Extract basic info
-            name = person_data.get('name')
-            if not name:
-                return results
+                # Parse the h2 text: "Name, Age City, State"
+                h2_text = h2.get_text(strip=True)
 
-            # Extract current address
-            home_locations = person_data.get('HomeLocation', [])
-            current_address = ""
-            if home_locations:
-                # First location is typically current
-                loc = home_locations[0]
-                if isinstance(loc, dict):
-                    addr = loc.get('address', {})
-                    if isinstance(addr, dict):
-                        street = addr.get('streetAddress', '')
-                        city = addr.get('addressLocality', '')
-                        state = addr.get('addressRegion', '')
-                        zip_code = addr.get('postalCode', '')
-                        current_address = f"{street}, {city}, {state} {zip_code}".strip()
+                # Extract name, age, location using regex
+                # Pattern: "FirstName LastName, NN City, State"
+                match = re.match(r'([A-Za-z\s]+),\s*(\d+)([A-Za-z\s,]+)', h2_text)
+                if not match:
+                    continue
 
-            # Extract age from birthDate
-            birth_date = person_data.get('birthDate')
-            age = None
-            if birth_date:
+                name = match.group(1).strip()
+                age_str = match.group(2)
+                location = match.group(3).strip()
+
+                # Parse age
                 try:
-                    birth_year = int(birth_date)
-                    age = datetime.now().year - birth_year
+                    age = int(age_str)
                 except (ValueError, TypeError):
-                    pass
+                    age = None
 
-            # Create summary result (using correct NPD field names)
-            summary = SummaryResult(
-                resultId="npd_0",
-                fullName=name,
-                addressPreview=current_address,
-                phonePreview=person_data.get('telephone', [None])[0] if person_data.get('telephone') else ""
-            )
+                # Find profile URL (link within or after h2)
+                profile_url = ""
+                link = h2.find_next('a', href=re.compile(r'/people/'))
+                if link:
+                    profile_url = link.get('href', '')
 
-            results.append(summary)
+                # Create summary result
+                summary = SummaryResult(
+                    resultId=f"npd_{len(results)}",
+                    fullName=name,
+                    address=location,  # "City, State" from parsed text
+                    ageRange=str(age) if age else "",
+                    age=age,
+                    profileUrl=profile_url  # type: ignore
+                )
+
+                results.append(summary)
+
+                # Limit to 5 results
+                if len(results) >= 5:
+                    break
 
         except Exception as e:
             logger.warning(f"Error extracting summary results: {e}")
