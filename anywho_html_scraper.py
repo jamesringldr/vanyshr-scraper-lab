@@ -102,13 +102,17 @@ class AnyWhoHtmlScraper:
             return None
 
     def _extract_summary_from_html(self, html: str) -> List[SummaryResult]:
-        """Extract multiple results from search page HTML using h2-based structure"""
+        """Extract multiple results from search page HTML using h2-based structure
+
+        Handles AnyWho's data-content attribute pattern for blurred data:
+        - Blurred digits (street numbers, phone last4, etc) are in data-content attributes
+        - Reconstruct by walking DOM and collecting both text nodes and data-content values
+        """
         soup = BeautifulSoup(html, 'html.parser')
         results = []
 
         try:
             # AnyWho organizes results by h2 tags containing names
-            # Pattern: h2 (name) -> following siblings with data (age, address, etc)
             h2_tags = soup.find_all('h2')
 
             seen_names = set()
@@ -131,44 +135,65 @@ class AnyWhoHtmlScraper:
                 # Extract data from following h3 sections (Lives in, Phone, Email, etc)
                 address = ""
                 age_text = ""
+                profile_url = ""
 
-                # Look for specific data sections after this person's h2
-                current = h2
-                section_stop = False
+                # Find the card container for this person
+                card = h2.find_parent(['div', 'section', 'article'])
+                if not card:
+                    card = h2.find_parent('div')
+                    # Go up a few levels to get full card
+                    for _ in range(3):
+                        if card.find_parent('div'):
+                            parent = card.find_parent('div')
+                            # Check if parent contains the full record (has multiple h3s)
+                            if parent.find_all('h3', limit=3):
+                                card = parent
 
-                # Collect text from next 100 siblings to extract data
-                data_text = ""
-                for _ in range(100):
-                    current = current.find_next_sibling()
-                    if not current:
-                        break
+                if card:
+                    # Extract data from h3 sections
+                    h3_tags = card.find_all('h3')
 
-                    # Stop if we hit another person h2
-                    if current.name == 'h2':
-                        section_stop = True
-                        break
+                    for h3 in h3_tags:
+                        label = h3.get_text(strip=True)
 
-                    tag_text = current.get_text(strip=True)
-                    data_text += tag_text + " "
+                        # Get content after this h3
+                        content_elem = h3.find_next(['div', 'p', 'a'])
+                        if not content_elem:
+                            continue
 
-                # Extract age from the data (usually right after name as "Age XX")
-                age_match = re.search(r'Age\s+(\d{1,3})', data_text)
-                if age_match:
-                    age_num = int(age_match.group(1))
-                    age_text = str(age_num) if age_num < 150 else ""
+                        # Reconstruct text with data-content values
+                        reconstructed = self._reconstruct_with_data_content(content_elem)
 
-                # Extract address from "Lives in:" section
-                lives_in_match = re.search(r'Lives in:([^U]+?)(?:Used to|Phone|$)', data_text)
-                if lives_in_match:
-                    address = lives_in_match.group(1).strip()
-                    # Clean up the address (remove extra spaces)
-                    address = re.sub(r'\s+', ' ', address)[:100]
+                        if 'Lives in' in label:
+                            address = reconstructed[:150]
+                        elif 'Phone' in label:
+                            # Extract just the first phone
+                            phones = [p.strip() for p in reconstructed.split('•')]
+                            if phones:
+                                # Find phone in extracted text
+                                phone_match = re.search(r'\(\d{3}\)\s*\d{3}-\d+', phones[0])
+                                if phone_match:
+                                    profile_url = ""  # AnyWho doesn't expose phone in summary
+
+                    # Extract age (should be near name)
+                    age_span = h2.find_next(string=re.compile(r'Age'))
+                    if age_span:
+                        age_match = re.search(r'Age\s+(\d{1,3})', str(age_span))
+                        if age_match:
+                            age_num = int(age_match.group(1))
+                            age_text = str(age_num) if age_num < 150 else ""
+
+                    # Find profile URL (View Details button in this card)
+                    detail_link = card.find('a', href=re.compile(r'/people/.*?/a\d+'))
+                    if detail_link:
+                        profile_url = detail_link.get('href', '')
 
                 summary = SummaryResult(
                     resultId=f"anywho_{len(results)}",
                     fullName=name,
                     address=address,
-                    ageRange=age_text
+                    ageRange=age_text,
+                    profileUrl=profile_url  # type: ignore
                 )
 
                 if summary.fullName:
@@ -180,6 +205,30 @@ class AnyWhoHtmlScraper:
             logger.warning(f"Error extracting summary results: {e}")
 
         return results
+
+    def _reconstruct_with_data_content(self, element) -> str:
+        """Reconstruct text from an element by combining text nodes and data-content attributes"""
+        parts = []
+
+        # Walk all children and descendants
+        for child in element.descendants:
+            if isinstance(child, str):
+                text = str(child).strip()
+                # Only include meaningful text (not just whitespace)
+                if text and len(text) > 0:
+                    parts.append(text)
+            elif hasattr(child, 'name') and child.name == 'span':
+                # Check for data-content attribute (blurred data)
+                if 'data-content' in child.attrs:
+                    dc = child.get('data-content')
+                    parts.append(dc)  # Add unblurred data
+                else:
+                    # Regular span text
+                    text = child.get_text(strip=True)
+                    if text:
+                        parts.append(text)
+
+        return ' '.join(parts)
 
     def _parse_age_from_text(self, text: str) -> Optional[int]:
         """Extract age from longer text"""
