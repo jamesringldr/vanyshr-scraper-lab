@@ -45,6 +45,25 @@ def assert_no_blur_artifacts(value, label=""):
         assert glyph not in (value or ""), f"{label}: unresolved blur artifact in {value!r}"
 
 
+MORE_AFFORDANCE = re.compile(r'^\+?\s*\d*\s*more$', re.IGNORECASE)
+
+
+def assert_no_ui_artifacts(value, label=""):
+    """
+    A truncated broker list ends with a "show more" affordance ("+ 6 more").
+    Split on the same separator as the real items, it lands in the data as if
+    it were a person's name -- a relative called "+ 1 more" reaching the DB.
+    """
+    for item in split_multi(value):
+        assert not MORE_AFFORDANCE.match(item), f"{label}: UI affordance stored as data: {item!r}"
+
+
+def assert_capped(value, limit=5, label=""):
+    """Multi-value fields carry at most `limit` entries."""
+    count = len(split_multi(value))
+    assert count <= limit, f"{label}: {count} values exceeds cap of {limit}: {value!r}"
+
+
 def assert_street_address(value, label=""):
     """A street address must retain its house number."""
     assert STREET_ADDRESS.match(value or ""), f"{label}: address missing street number: {value!r}"
@@ -57,6 +76,9 @@ def assert_summary_quality(summary, label="", expect_phone=True, expect_email=Tr
     assert_emails_complete(getattr(summary, "email", ""), label)
     for field in ("address", "phone", "email", "aliases", "relatives"):
         assert_no_blur_artifacts(getattr(summary, field, ""), f"{label}.{field}")
+    for field in ("phone", "email", "aliases", "relatives"):
+        assert_no_ui_artifacts(getattr(summary, field, ""), f"{label}.{field}")
+        assert_capped(getattr(summary, field, ""), 5, f"{label}.{field}")
     if expect_phone:
         assert getattr(summary, "phone", ""), f"{label}: expected a phone number"
     if expect_email:

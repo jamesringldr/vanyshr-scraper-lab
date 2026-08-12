@@ -20,7 +20,9 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from anywho_html_scraper import AnyWhoHtmlScraper  # noqa: E402
 from data_quality import (  # noqa: E402
+    assert_capped,
     assert_emails_complete,
+    assert_no_ui_artifacts,
     assert_phones_complete,
     assert_street_address,
     assert_summary_quality,
@@ -105,6 +107,34 @@ class TestMultiResultPage:
         results = scraper._extract_summary_from_html(load("chris_rodgers_ks"))
         junk = {"Filter by State", "Filter by Age", "Frequently Asked Questions"}
         assert not [r for r in results if r.fullName in junk]
+
+
+class TestListHygiene:
+    """
+    AnyWho truncates long lists with a "show more" affordance ("+ 2 more"),
+    separated by the same bullet as the real entries. Observed in a live run as
+    a relative literally named "+ 1 more".
+    """
+
+    def test_show_more_not_stored_as_a_relative(self, scraper):
+        for r in scraper._extract_summary_from_html(load("chris_rodgers_ks")):
+            assert_no_ui_artifacts(r.relatives, f"{r.fullName}.relatives")
+            assert_no_ui_artifacts(r.aliases, f"{r.fullName}.aliases")
+
+    @pytest.mark.parametrize("field", ["phone", "email", "aliases", "relatives"])
+    def test_fields_capped_at_five(self, scraper, field):
+        for r in scraper._extract_summary_from_html(load("chris_rodgers_ks")):
+            assert_capped(getattr(r, field), 5, f"{r.fullName}.{field}")
+
+    def test_join_section_drops_affordance_and_caps(self, scraper):
+        joined = scraper._join_section(
+            ["Ann Smith", "+ 2 more", "Bo Lee", "more", "Cy Fox", "Di Ray", "Ed Poe", "Fay Ito"]
+        )
+        assert "more" not in joined
+        assert len(joined.split(",")) == 5
+
+    def test_join_section_deduplicates(self, scraper):
+        assert scraper._join_section(["Ann Smith", "Ann Smith"]) == "Ann Smith"
 
 
 class TestNoResults:

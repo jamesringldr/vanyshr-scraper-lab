@@ -248,7 +248,7 @@ class NPDHtmlScraper:
         return ', '.join(seen[:limit])
 
     @classmethod
-    def _format_phones(cls, values, limit: int = 3) -> str:
+    def _format_phones(cls, values, limit: int = 5) -> str:
         """
         Normalise JSON-LD phone digits to (XXX) XXX-XXXX.
 

@@ -190,21 +190,17 @@ class AnyWhoHtmlScraper:
                         # match here means the number really is incomplete and must
                         # not be emitted as if it were whole.
                         phones_list = re.findall(r'\(\d{3}\)\s*\d{3}-\d{4}', section_content)
-                        if phones_list:
-                            phone_str = ', '.join(phones_list[:3])
+                        phone_str = self._join_section(phones_list)
                     elif 'EMAIL' in label:
                         # Extract email addresses (handles obfuscated middle parts)
                         email_list = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+(?:\.[a-zA-Z]{2,})?', section_content)
-                        if email_list:
-                            email_str = ', '.join(email_list[:3])
+                        email_str = self._join_section(email_list)
                     elif 'AKA' in label:
                         # Aliases - split by bullet
-                        names = section_content.split('•')
-                        aliases_str = ', '.join([n.strip() for n in names if n.strip()][:3])
+                        aliases_str = self._join_section(section_content.split('•'))
                     elif 'RELATED' in label or 'MAY BE RELATED' in label:
                         # Relatives - split by bullet
-                        names = section_content.split('•')
-                        relatives_str = ', '.join([n.strip() for n in names if n.strip()][:5])
+                        relatives_str = self._join_section(section_content.split('•'))
 
                 # Find profile URL (View Details link in this card)
                 detail_link = card.find('a', href=re.compile(r'/people/.*?/a\d+'))
@@ -232,6 +228,27 @@ class AnyWhoHtmlScraper:
             logger.warning(f"Error extracting summary results: {e}")
 
         return results
+
+    # AnyWho ends a truncated list with its "show more" affordance ("+ 6 more").
+    # Split on bullets that reads as another list item, so it lands in the data
+    # as if it were a person's name or an alias.
+    MORE_AFFORDANCE = re.compile(r'^\+?\s*\d*\s*more$', re.IGNORECASE)
+
+    # Values kept per multi-value field
+    MAX_VALUES = 5
+
+    @classmethod
+    def _join_section(cls, values, limit: int = None) -> str:
+        """Clean, de-duplicate and cap a multi-value section."""
+        limit = cls.MAX_VALUES if limit is None else limit
+        cleaned = []
+        for value in values:
+            value = (value or "").strip()
+            if not value or cls.MORE_AFFORDANCE.match(value):
+                continue
+            if value not in cleaned:
+                cleaned.append(value)
+        return ', '.join(cleaned[:limit])
 
     def _reconstruct_with_data_content(self, element) -> str:
         """

@@ -1,0 +1,29 @@
+search_ID,profile_number,target,first_name,last_name,city,state_id,age,response_time_s,brokers_searched,total_results,notes,address,phones,emails,aliases,relatives
+ocker,SUMMARY,ALL,Chris,Ocker,Columbia,MO,,3.92,2,2,Summary row with timing,,,,,
+ocker,1,fps,Christopher,Ocker,Columbia,MO,37,0.71,,,Profile 1 from fps,"3521 Barcus CT, Columbia MO 65203",,,,"Alyssia Norby, Alyssia Ocker, Deena Ocker, James Ocker, Landon Ocker"
+ocker,NO_RESULTS,npd,Chris,Ocker,Columbia,MO,,2.60,,,"Status: failed (Error code: 404 - {'message': 'Target page returned a 404 for https://nationalpublicdata.com/people/o/chris-ocker/mo/columbia/', 'error_code': 'NOT_FOUND', 'key_metadata': {'credits_consumed': 0, 'credits_remaining': 8793}})",,,,,
+ocker,1,anywho,Christopher,Ocker,Columbia,MO,37,0.59,,,Profile 1 from anywho,"3521 Barcus Ct, Columbia, MO","(816) 632-6432, (270) 678-9049, (816) 632-5692",,"Christophe James Ocker, Christophr Ocker","Deena Ocker, James Ocker, Landon Ocker"
+rodgers,SUMMARY,ALL,Chris,Rodgers,Shawnee,KS,,2.74,2,10,Summary row with timing,,,,,
+rodgers,1,fps,Christine,Rodgers,Shawnee,KS,63,0.44,,,Profile 1 from fps,"27027 W 77th St, Shawnee KS 66227",,,,"John Rodgers, Alice Hall, David Rodgers, Jared Rodgers, John Hall"
+rodgers,2,fps,Christopher,Rodgers,Shawnee,KS,35,0.44,,,Profile 2 from fps,"7116 Cedar St, Prairie Village KS 66208",,,,"Christopher Comfort, Linda Goebel, Charles Wiseman, Clinton Wiseman, David Wiseman"
+rodgers,3,fps,Christopher,Rodgers,Shawnee,KS,47,0.44,,,Profile 3 from fps,"11703 W 68th Ter, Shawnee KS 66203",,,,"April Rodgers, Bonnie Rogers, Casey Rodgers, Casey Rodgers, Christian Rodgers"
+rodgers,4,fps,Christine,Rogers,Shawnee,KS,59,0.44,,,Profile 4 from fps,"2625 Haskell Ave, Lawrence KS 66046",,,,"Terry Davenport, Austin Torneden, Betty Rogers, Brandy Hodson, Cameron Davenport"
+rodgers,5,fps,Kristi,Rodgers,Shawnee,KS,44,0.44,,,Profile 5 from fps,"5933 Knox Ave, Shawnee KS 66203",,,,"Kevin Dowdy, Amanda Patton, Dan Rogers, Diane Dowdy, Douglas Padgett"
+rodgers,NO_RESULTS,npd,Chris,Rodgers,Shawnee,KS,,1.63,,,"Status: failed (Error code: 404 - {'message': 'Target page returned a 404 for https://nationalpublicdata.com/people/r/chris-rodgers/ks/shawnee/', 'error_code': 'NOT_FOUND', 'key_metadata': {'credits_consumed': 0, 'credits_remaining': 8791}})",,,,,
+rodgers,1,anywho,Chris,Rodgers,Shawnee,KS,47,0.66,,,Profile 1 from anywho,"11703 W 68th Ter, Shawnee, KS","(913) 449-1971, (252) 522-3352","crodgers1224@yahoo.com, crodgers87@yahoo.com","Christopher Michael Rodgers, Kathy H Rodgers, Casey Rodgers","Casey Rodgers, Brian Rodgers, Suzanne Rodgers, Kathy Rodgers, Courtney Rodgers"
+rodgers,2,anywho,Chris,Rodgers,Shawnee,KS,49,0.66,,,Profile 2 from anywho,"2306 S Scott Ave, Independence, MO","(816) 739-4368, (816) 217-5024, (816) 254-3781",bobthecannibal@sbcglobal.net,Christopher Allen Rodgers,"Kishna Rodgers, Robin Baker, Bruce Rodgers, Peter Rodgers"
+rodgers,3,anywho,Christine,Rodgers,Shawnee,KS,63,0.66,,,Profile 3 from anywho,"27027 W 77th St, Shawnee, KS","(913) 441-9485, (913) 686-2027",,"Christine Alyson Rodgers, Chris A Hall, Christine Hall","David Rodgers, John Rodgers"
+rodgers,4,anywho,Christopher,Rodgers,Shawnee,KS,35,0.66,,,Profile 4 from anywho,"13102 W 75th Ter, Shawnee, KS",,,Christopher James Rodgers,Linda Goebel
+rodgers,5,anywho,Christina,Rodgers,Shawnee,KS,55,0.66,,,Profile 5 from anywho,"6107 Sw Park Pl, Lawton, OK","(913) 680-1896, (417) 831-2036","christinarodgers@address.com, delpit.stephanie@gmail.com","Christina Elaine Rodgers, Christina E Rogers","Florence Rodgers, James Rodgers, Sandra Bradeen"
+inman,SUMMARY,ALL,Claire,Inman,Prairie Village,KS,,2.95,2,1,Summary row with timing,,,,,
+inman,1,fps,Corey,Inman,Prairie Village,KS,60,0.42,,,Profile 1 from fps,"3745 Bilberry St, Unit 210, Castle Rock CO 80109",,,,"Bill Inman, Billy Inman, Corey Inman, Corey Inman, Denise Inman"
+inman,NO_RESULTS,npd,Claire,Inman,Prairie Village,KS,,2.02,,,"Status: failed (Error code: 404 - {'message': 'Target page returned a 404 for https://nationalpublicdata.com/people/i/claire-inman/ks/prairie-village/', 'error_code': 'NOT_FOUND', 'key_metadata': {'credits_consumed': 0, 'credits_remaining': 8789}})",,,,,
+inman,NO_RESULTS,anywho,Claire,Inman,Prairie Village,KS,,0.50,,,Status: no_results,,,,,
+henry,SUMMARY,ALL,Colton,Henry,Eskridge,KS,,2.32,2,1,Summary row with timing,,,,,
+henry,1,fps,Jackson,Henry,Eskridge,KS,34,0.41,,,Profile 1 from fps,"1404 NE 95th Ter, Kansas City MO 64155",,,,"Dorene Henry, Jack Henry, Kayla Jamison, Ryan Henry, David Jamison"
+henry,NO_RESULTS,npd,Colton,Henry,Eskridge,KS,,1.29,,,"Status: failed (Error code: 404 - {'message': 'Target page returned a 404 for https://nationalpublicdata.com/people/h/colton-henry/ks/eskridge/', 'error_code': 'NOT_FOUND', 'key_metadata': {'credits_consumed': 0, 'credits_remaining': 8787}})",,,,,
+henry,NO_RESULTS,anywho,Colton,Henry,Eskridge,KS,,0.60,,,Status: no_results,,,,,
+oehring,SUMMARY,ALL,James,Oehring,Cameron,MO,,1.64,3,3,Summary row with timing,,,,,
+oehring,1,fps,James,Oehring,Cameron,MO,61,0.57,,,Profile 1 from fps,"413 Lovers Ln, Cameron MO 64429",,,,"Rickilinda Oehring, Robert Mctarsney, Albert Mcgee, Barbara Koelsch, Carol Mctarsney"
+oehring,1,npd,James,Oehring,Cameron,MO,62,0.47,,,Profile 1 from npd,"413 Lovers Ln, Cameron, MO","(816) 632-2218, (816) 225-8592","ja_studly@hotmail.com, ja_oehring50@hotmal.com, jaoehring@gmail.com, ja_studly@msn.com, rickioehring@yahoo.com",,Rickilinda Oehring
+oehring,1,anywho,James,Oehring,Cameron,MO,37,0.59,,,Profile 1 from anywho,"1225 Union Ave, Apt 502, Kansas City, MO",(816) 632-2218,"rickioehring@yahoo.com, jastudly@hotmail.com",James Allen Oehring Jr.,Rickilinda Oehring
