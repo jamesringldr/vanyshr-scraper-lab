@@ -37,8 +37,8 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from context.dev import ContextDev
 
-# Add lab to path for models
-sys.path.insert(0, str(Path(__file__).parent.parent / "vanyshr-scraper-lab"))
+# targets/ models live alongside this module
+sys.path.insert(0, str(Path(__file__).parent))
 
 from targets.zaba.models import ScrapeOutput, Profile
 

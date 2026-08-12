@@ -386,15 +386,63 @@ Create comprehensive 17-person test framework to validate Phase 1 summary scrape
 
 ### Known Issues / Blockers
 
-#### 🔴 **CRITICAL: CSV Parsing/Insertion Problem**
-- **Symptom:** Data extracted correctly but CSV has truncated/missing values in some fields
-- **Root Cause:** TBD — likely issue in `sequence_runner.py` CSV conversion logic or test_all_17_profiles.py data aggregation
-- **Evidence:**
-  - Phone numbers showing as "(816) 632-" (incomplete)
-  - Some email/aliases/relatives fields empty despite successful extraction
-  - Extraction logic working (h3 parsing, data-content reconstruction all verified)
-- **Impact:** CSV results unreliable for spot-checking accuracy
-- **Handoff:** Detailed debug prompt + README in Vanyshr-mono/packages/scraper-lab-phase1/
+#### ✅ **RESOLVED: was mis-filed as a "CSV parsing problem" — it was extraction**
+
+The earlier entry here blamed the CSV writer. That was wrong, and it sent the
+handoff in the wrong direction. `test_all_17_profiles.py` writes exactly what
+it is handed: it opens `'w'`, calls `writeheader()` once, and uses `DictWriter`
+correctly. The data was already damaged before it reached the CSV.
+
+The giveaway was that truncation was *systematic*: every AnyWho phone lost
+exactly its last four digits. A CSV bug does not clip the same four characters
+every time.
+
+**Three separate defects, all in extraction:**
+
+1. **AnyWho `_reconstruct_with_data_content()` was not recursive.** AnyWho blurs
+   sensitive values — the visible text holds the leading fragment and the rest
+   lives in a `data-content` attribute on an *empty* nested span, rendered by
+   CSS `before:content-[attr(data-content)]`. The helper's comment said
+   "recursively process nested elements" but the code called
+   `child.get_text(strip=True)`, which returns visible text only and discards
+   every nested `data-content`. The blurred span sits two levels deep
+   (`div > span > span[data-content]`), so it was always dropped.
+   This damaged phones, email local parts, and street numbers simultaneously.
+
+2. **AnyWho age was never extracted.** The lookup used
+   `find('span', string=re.compile(r'Age'))`, but the age span also contains an
+   `<svg>`; bs4's `string=` matcher only matches single-child tags, so it never
+   hit. Now read from the reconstructed header text.
+
+3. **NPD ignored its own JSON-LD.** NPD is the richest Phase 1 source, but the
+   rendered card carries only name, age and city/state. Phones, emails, street
+   address and relatives are published solely in the embedded JSON-LD `Person`
+   block, which the summary path never read (`_extract_jsonld_person` existed
+   but was only used on the profile path).
+
+**Also fixed:** FPS was returning `Cameron, MO` as the address because it read
+the link text; the full street address is in the anchor's `title` attribute
+(`413 Lovers Ln, Cameron MO 64429`). FPS relatives were present as links under
+`<h4>Relatives:</h4>` and simply not parsed.
+
+**Verified — 17-profile re-run, 104 rows:** 0 truncated phones, 0 truncated
+emails, AnyWho age 28/28 (was 0/28), NPD contact fields 4/4 (was 0/4),
+FPS full street addresses 38/40.
+
+**Why no test caught this:** the existing suite covers the old `workers/`
+modules (`npd_scraper`, `anywho_test`) — nothing imported any
+`*_html_scraper.py`, which is what the pipeline actually runs. The "46/46
+passed, phone reassembly from data-content ✅" result was green on code the
+pipeline does not call.
+
+**Regression cover added** (`tests/`, fixture-driven, no network):
+- `test_anywho_html_scraper.py`, `test_fps_html_scraper.py`,
+  `test_npd_html_scraper.py` — assert *completeness*, not presence
+- `test_scrape_broker_contract.py` — the three brokers expose three different
+  `SummaryResult` shapes bridged by a getattr chain in `sequence_runner.py`;
+  this asserts no populated field silently becomes `""` on the way to the DB
+- `data_quality.py` — shared completeness assertions
+- `capture_fixtures.py` — re-capture real broker HTML when markup changes
 
 #### ⚠️ **Minor: Zaba Residential Connection Errors**
 - [Errno 61] Connection refused on serv01:8789
@@ -423,16 +471,24 @@ Create comprehensive 17-person test framework to validate Phase 1 summary scrape
 
 ### Next Steps
 
-1. **Debug CSV parsing issue** — Trace data flow from broker results → CSV output
-   - Verify sequence_runner.py field extraction
-   - Check test_all_17_profiles.py CSV writing logic
-   - Validate data types in SummaryResult instances
+1. **NPD coverage** — 13 of 17 profiles return NO_RESULTS. Extraction is now
+   confirmed correct (the 4 that do return are 100% populated), so this is
+   either genuine database coverage or the city/state URL filter being too
+   strict. Worth testing the same names without the city segment before
+   concluding NPD is simply thin.
 
-2. **Verify phone number truncation** — Check if AnyWho extraction is incomplete or CSV truncating
+2. **AnyWho match quality** — separate from extraction: for `oehring` AnyWho
+   returns "James A Oehring", age 37, at a Kansas City address, whose AKA is
+   "James Allen Oehring Jr." That is likely the son, not the 61/62-year-old in
+   Cameron that FPS and NPD return. Dedup should not silently merge them.
 
-3. **Test with corrected CSV logic** — Re-run 17-person test to confirm all fields populate correctly
+3. **Phase 1 field coverage is now broker-specific** — FPS summary genuinely
+   carries no phone or email (they exist only on the full profile page); NPD
+   carries everything; AnyWho carries everything but not for every record.
+   Consolidation should prefer NPD for contact data.
 
-4. **Spot-check accuracy** — Against known profiles to identify which brokers most reliable
+4. **Repo layout** — the lab is no longer a repo nested inside its own
+   worktree; `vanyshr-scraper-sequence` is now the single working tree.
 
 ### Handoff Documentation
 

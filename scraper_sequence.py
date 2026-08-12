@@ -31,8 +31,8 @@ from datetime import datetime
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-# Add parent to path to import scrapers
-sys.path.insert(0, str(Path(__file__).parent.parent / "vanyshr-scraper-lab"))
+# targets/ models live alongside this module
+sys.path.insert(0, str(Path(__file__).parent))
 
 from targets.fps.scraper import FPSScraper as FPSScraperClass
 from targets.npd.scraper import NPDScraper as NPDScraperClass

@@ -18,11 +18,11 @@ from datetime import datetime
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from context.dev import ContextDev
 
-# Add lab to path for models
-sys.path.insert(0, str(Path(__file__).parent.parent / "vanyshr-scraper-lab"))
+# targets/ models live alongside this module
+sys.path.insert(0, str(Path(__file__).parent))
 
 from targets.anywho.models import ScrapeOutput, SummaryResult, Profile
 
@@ -43,6 +43,9 @@ class AnyWhoHtmlScraper:
     """AnyWho scraper using context.dev HTML method (cost-efficient)"""
 
     BASE_URL = "https://www.anywho.com"
+
+    # Tags whose subtree holds no readable content during reconstruction
+    SKIP_TAGS = {'svg', 'script', 'style', 'noscript'}
 
     # State name mapping for AnyWho URL format
     STATE_NAMES = {
@@ -147,12 +150,14 @@ class AnyWhoHtmlScraper:
                 aliases_str = ""
                 relatives_str = ""
 
-                # Extract age from h2 line (format: "Name, Age 34")
-                # Look for the span next to h2 that contains age
+                # Extract age from the h2 header line (format: "Name, Age 34")
+                # The age span also contains an <svg>, which makes bs4's `string=`
+                # matcher miss it (it only matches single-child tags), so read the
+                # whole header instead.
                 h2_parent = h2.find_parent('div')
-                age_span = h2_parent.find('span', string=re.compile(r'Age')) if h2_parent else None
-                if age_span:
-                    age_match = re.search(r'Age\s+(\d{1,3})', age_span.get_text(strip=True))
+                if h2_parent:
+                    header_text = self._reconstruct_with_data_content(h2_parent)
+                    age_match = re.search(r'Age\s+(\d{1,3})', header_text)
                     if age_match:
                         age_num = int(age_match.group(1))
                         age_text = str(age_num) if age_num < 150 else ""
@@ -172,29 +177,19 @@ class AnyWhoHtmlScraper:
                             section_content += " " + section_text
                         elem = elem.find_next_sibling()
 
-                    section_content = section_content.strip()
+                    # Reconstruction preserves source whitespace; collapse it here
+                    section_content = re.sub(r'\s+', ' ', section_content).strip()
 
                     # Extract by section type
                     if 'LIVES IN' in label:
                         # Current address - take just the first line
                         address = section_content.split('•')[0].strip()[:150]
                     elif 'PHONE' in label:
-                        # Extract phone numbers: (XXX) XXX-XXXX format
-                        # First try direct match
-                        phones_list = re.findall(r'\(\d{3}\)\s*\d{3}-\d+', section_content)
-
-                        # If no matches, phone numbers might be split across spans (common pattern)
-                        # Look for pattern like "(816) 263-" followed by data like "0393"
-                        if not phones_list:
-                            # More lenient pattern to catch partial numbers
-                            phones_partial = re.findall(r'\(\d{3}\)\s*\d{3}-(?:\d+|\s|\w+)?', section_content)
-                            # Try to extract from lines split by •
-                            for line in section_content.split('•'):
-                                line = line.strip()
-                                if re.match(r'\(\d{3}\)', line):
-                                    # Clean up: ensure it looks like a phone
-                                    phones_list.append(line)
-
+                        # Require all four trailing digits. The blurred last-4 is
+                        # recovered by _reconstruct_with_data_content, so a partial
+                        # match here means the number really is incomplete and must
+                        # not be emitted as if it were whole.
+                        phones_list = re.findall(r'\(\d{3}\)\s*\d{3}-\d{4}', section_content)
                         if phones_list:
                             phone_str = ', '.join(phones_list[:3])
                     elif 'EMAIL' in label:
@@ -242,49 +237,38 @@ class AnyWhoHtmlScraper:
         """
         Reconstruct text from an element by combining text nodes and data-content attributes.
 
-        Handles AnyWho's blur pattern where sensitive data is stored in data-content:
-        <span data-content="7935" class="blur-sm">...</span><span> Holmes Rd, Kansas City, MO</span>
+        AnyWho blurs sensitive values: the visible text holds the leading fragment
+        and the remainder sits in a data-content attribute on an *empty* nested span,
+        rendered by CSS `before:content-[attr(data-content)]`:
 
-        Returns concatenated text with data-content values inserted inline without extra spaces.
-        - data-content values are fragments of words (no space before them)
-        - Regular text gets space only before new words (starting with uppercase or after symbols)
+        <div><span><span>(816) 632-</span>
+                   <span class="blur-sm" data-content="2218"></span></span></div>
+
+        The blurred span is typically two or more levels deep, so this walks the
+        whole subtree. Reading visible text only (get_text) yields "(816) 632-",
+        which still looks populated downstream -- that is the bug this guards.
+
+        Text is emitted verbatim; callers collapse whitespace.
         """
+        if isinstance(element, NavigableString):
+            return str(element)
+
+        if not hasattr(element, 'children'):
+            return element.get_text()
+
         parts = []
 
-        # Process direct children only (one level of siblings) to get structured content
-        if not hasattr(element, 'children'):
-            return element.get_text(strip=True)
-
         for child in element.children:
-            if isinstance(child, str):
-                text = str(child).strip()
-                if text and text not in ['•', 'more']:  # Filter out bullets and generic words
-                    # Add space before text that starts with letter, but only if last part
-                    # is not a partial word (doesn't end with dash or partial text)
-                    if parts and text[0].isalpha() and not parts[-1].endswith('-'):
-                        parts.append(' ')
-                    parts.append(text)
-            elif hasattr(child, 'name'):
-                if child.name == 'span':
-                    # Check for data-content (blurred value) - these are PARTS of words
-                    if 'data-content' in child.attrs:
-                        dc = child.get('data-content')
-                        # Never add space before data-content (it's part of a split word/phrase)
-                        parts.append(dc)
-                    else:
-                        # Regular span - get text
-                        text = child.get_text(strip=True)
-                        if text:
-                            if parts and text[0].isalpha() and not parts[-1].endswith('-'):
-                                parts.append(' ')
-                            parts.append(text)
-                elif child.name in ['div', 'p', 'a']:
-                    # Recursively process nested elements
-                    text = child.get_text(strip=True)
-                    if text:
-                        if parts and text[0].isalpha() and not parts[-1].endswith('-'):
-                            parts.append(' ')
-                        parts.append(text)
+            if isinstance(child, NavigableString):
+                parts.append(str(child))
+            elif child.name:
+                # svg/script/style carry no readable content, only markup noise
+                if child.name in self.SKIP_TAGS:
+                    continue
+                if child.has_attr('data-content'):
+                    # CSS renders data-content ahead of the element's own content
+                    parts.append(child['data-content'])
+                parts.append(self._reconstruct_with_data_content(child))
 
         return ''.join(parts)
 

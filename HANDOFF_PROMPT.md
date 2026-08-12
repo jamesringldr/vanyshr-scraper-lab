@@ -1,219 +1,132 @@
-# Phase 1 Scraper Test Framework — Agent Handoff Prompt
+# Phase 1 Scraper — Handoff
 
-## Mission
-**Fix the CSV parsing issue preventing accurate result reporting in the 17-person test framework.**
+> **Superseded.** The previous version of this file asked the next agent to fix
+> a "CSV parsing issue". There was no CSV bug. The real defects were in
+> extraction and are now fixed and covered by tests. That earlier diagnosis is
+> preserved below under "What the original handoff got wrong" so the reasoning
+> isn't lost — do not act on it.
 
-Current status:
-- ✅ HTML extraction working (brokers return data correctly)
-- ✅ Test framework running (17 profiles × 3 brokers = results)
-- ❌ CSV parsing broken (some fields truncated/missing in output)
+## Current status
 
-The extraction logic is solid. The problem is in how we're aggregating/writing those results to CSV.
+Phase 1 (summary search across FPS, NPD, AnyWho) extracts complete data and is
+regression-covered by fixture-driven tests that need no network.
 
----
+Last full run: 17 profiles, 104 rows, ~3 s/profile.
 
-## What You're Working With
+| | rows | age | address | phone | email | aliases | relatives |
+|---|---|---|---|---|---|---|---|
+| FPS | 40 | 36 | 38 | — | — | — | 38 |
+| NPD | 4 | 4 | 4 | 4 | 4 | — | 4 |
+| AnyWho | 28 | 28 | 28 | 23 | 15 | 27 | 26 |
 
-### Location
-`/Users/jameso/DevWork/vanyshr-stack/vanyshr-scraper-sequence/vanyshr-scraper-lab/`
+0 truncated phones, 0 truncated emails.
 
-### Key Files
-- `test_all_17_profiles.py` — The test runner (THE ENTRY POINT)
-- `sequence_runner.py` — Broker orchestration + field extraction (problem likely here)
-- `data_models.py` — SummaryResult dataclass (verify field definitions)
-- Sample output: `/Users/jameso/Downloads/Test_Profiles_-_detailed_results.csv`
+FPS dashes are correct, not gaps: the FPS **summary** page carries no phone or
+personal email at all. Those come from the full profile page (Phase 2). This is
+asserted deliberately in `tests/test_fps_html_scraper.py` so nobody re-opens it.
 
----
+## How to run
 
-## The Problem (Detailed)
-
-### Symptom
-Running `python3 test_all_17_profiles.py` produces `/Users/jameso/Downloads/Test_Profiles_-_detailed_results.csv` with incomplete data:
-
-**Example issues:**
-```
-Phones truncated:    "(816) 632-" instead of "(816) 632-2218"
-Email blank:         "" when it should be "r@yahoo.com, j@hotmail.com"
-Aliases empty:       "" when extracted data exists
-Relatives missing:   Similar blanks despite successful extraction
-```
-
-### Root Cause Candidates
-
-**Hypothesis 1: `sequence_runner.py` `_scrape_broker()` field extraction (Lines ~270)**
-- Using `getattr(summary, 'field', getattr(summary, 'fieldPreview', ''))`
-- Possible issues:
-  - Field names don't match broker response structure
-  - Getattr fallback not working (both variants missing)
-  - Data being truncated during assignment
-  - Type conversion issues (list → str concatenation)
-
-**Hypothesis 2: `test_all_17_profiles.py` CSV writing logic**
-- CSV fieldnames mismatch
-- CSV module truncating fields
-- Row overwrites instead of appends
-- String encoding issues
-
-**Hypothesis 3: Data model definition**
-- `data_models.py` SummaryResult fields not initialized properly
-- Default empty strings masking real values
-- Field type mismatches
-
-**Hypothesis 4: Context.dev API response parsing**
-- HTML scraper not extracting complete values
-- AnyWho data-content reconstruction cutting off prematurely
-
----
-
-## How to Debug (Step-by-Step)
-
-### Step 1: Run a Single-Profile Test
 ```bash
-# Edit test_all_17_profiles.py, change line ~50 to test just one profile:
-# profiles = profiles[:1]  # Just first profile
+# Unit tests — no network, no API key
+cd tests && python3 -m pytest -q --ignore=./test_scrape_runner.py
 
-python3 test_all_17_profiles.py 2>&1 | tee debug.log
-```
-
-### Step 2: Inspect Broker Output
-Add logging to `sequence_runner.py` `_scrape_broker()` around line 270:
-
-```python
-def _scrape_broker(self, broker_name, params):
-    # ... existing code ...
-    
-    summary_results = broker_result.get('summary_results', [])
-    for summary_dict in summary_results:
-        summary = SummaryResult(**summary_dict)
-        
-        # ← ADD DEBUG LOGGING HERE
-        print(f"\n[DEBUG] Broker: {broker_name}")
-        print(f"  Raw phone: {summary_dict.get('phone', 'N/A')}")
-        print(f"  Raw email: {summary_dict.get('email', 'N/A')}")
-        print(f"  SummaryResult phone: {summary.phone}")
-        print(f"  SummaryResult email: {summary.email}")
-        
-        # Continue with existing extraction...
-```
-
-### Step 3: Check CSV Row Before Write
-In `test_all_17_profiles.py`, add logging before CSV write:
-
-```python
-# Before: csv_writer.writerow(detail_row)
-print(f"[CSV DEBUG] Writing detail row: {detail_row}")
-print(f"  Phone value: '{detail_row.get('phones', '')}'")
-print(f"  Email value: '{detail_row.get('emails', '')}'")
-
-# Then write:
-csv_writer.writerow(detail_row)
-```
-
-### Step 4: Compare JSON vs CSV
-After single-profile test:
-1. Check raw broker JSON (if logged)
-2. Check intermediate CSV
-3. Compare field-by-field: which ones match, which are truncated?
-
----
-
-## Code Inspection Checklist
-
-### `sequence_runner.py` (Lines ~270)
-```python
-def _scrape_broker(self, broker_name, params):
-    # [Line 270 region] Field extraction:
-    # ✓ Check: Does 'phone' in broker_result match actual response key?
-    # ✓ Check: Is getattr() catching both 'phone' and 'phonePreview' correctly?
-    # ✓ Check: Are values complete strings, not truncated?
-    # ✓ Check: Type handling (list of strings → comma-separated string)?
-```
-
-### `test_all_17_profiles.py` (CSV Writing Section)
-```python
-# ✓ Check: CSV fieldnames match your dict keys?
-# ✓ Check: detail_row dict has all expected fields before writerow()?
-# ✓ Check: No CSV quoting/escaping issues?
-# ✓ Check: File opened in correct mode (w, not a)?
-```
-
-### `data_models.py` (SummaryResult Definition)
-```python
-@dataclass
-class SummaryResult:
-    # ✓ Check: All fields present?
-    # ✓ Check: Default values not masking real data?
-    # ✓ Check: Field types match how they're used (str, not list)?
-```
-
----
-
-## Expected Behavior (When Fixed)
-
-All fields should be complete and populated:
-
-```
-search_ID,profile_number,target,...,phones,emails,aliases,relatives
-ocker,1,fps,...,"(816) 632-2218, (816) 225-8592","ja_studly@hotmail.com","James Allen Oehring Jr.","Rickilinda Oehring, ..."
-ocker,NO_RESULTS,npd,...,,,,
-ocker,1,anywho,...,"(816) 632-2218, (270) 678-9012","r@yahoo.com, j@hotmail.com","Christophe James Ocker","Deena Ocker, James Ocker"
-```
-
-No truncation, no blanks where data should be.
-
----
-
-## Testing the Fix
-
-### Run Full Test
-```bash
+# Full 17-profile live run (~50 context.dev calls, ~$0.05)
 python3 test_all_17_profiles.py
+# -> /Users/jameso/Downloads/Test_Profiles_-_detailed_results.csv
+
+# Re-capture broker HTML fixtures (only when a broker changes its markup)
+python3 tests/capture_fixtures.py --force
 ```
 
-### Spot-Check Results
-Compare CSV against known profiles (all are real people James knows):
-- **oehring (James Oehring, Cameron, MO)**
-  - Should have: age ~61-62, address with "Lovers Ln", phone (816) 632-2218, relative Rickilinda Oehring
-  
-- **clark (Lucas Clark, Kansas City, MO)**
-  - Should have: multiple matches, ages 30-68, various addresses
+## What was actually wrong
 
-### Success Criteria
-✅ All 17 profiles tested
-✅ No truncated phone numbers
-✅ No blank email/alias/relative fields (where data exists)
-✅ Spot-check matches known profiles
-✅ CSV opens cleanly in Excel/Sheets
+**1. AnyWho `_reconstruct_with_data_content()` was not recursive.**
+AnyWho blurs sensitive values: visible text holds the leading fragment, the rest
+sits in a `data-content` attribute on an *empty* nested span rendered via CSS
+`before:content-[attr(data-content)]`:
+
+```html
+<div><span><span>(816) 632-</span>
+     <span class="blur-sm" data-content="2218"></span></span></div>
+```
+
+The helper's comment claimed recursion but the code called
+`child.get_text(strip=True)`, which returns visible text only and discards every
+nested `data-content`. The blurred span is two levels deep, so it was always
+lost — corrupting phones, email local parts and street numbers at once.
+
+**2. AnyWho age was never extracted.** `find('span', string=re.compile(r'Age'))`
+never matched because the age span also contains an `<svg>`, and bs4's `string=`
+only matches single-child tags.
+
+**3. NPD ignored its own JSON-LD.** The rendered card has only name, age and
+city/state. Phones, emails, street address and relatives live solely in the
+embedded JSON-LD `Person` block. `_extract_jsonld_person` already existed but
+was used only on the profile path.
+
+**4. FPS read link text instead of the title attribute.** The address link's
+text is `Cameron, MO`; the street address is in `title`
+(`413 Lovers Ln, Cameron MO 64429`). FPS relatives were present under
+`<h4>Relatives:</h4>` and simply not parsed.
+
+## Why no test caught it
+
+The pre-existing suite covers the old `workers/` modules (`npd_scraper`,
+`anywho_test`). Nothing imported any `*_html_scraper.py` — the modules the
+pipeline actually runs. A green "46/46 passed, phone reassembly ✅" was testing
+code that is not in the pipeline.
+
+Tests added (all fixture-driven, no network):
+
+- `tests/test_anywho_html_scraper.py`, `test_fps_html_scraper.py`,
+  `test_npd_html_scraper.py` — assert **completeness**, not presence: full
+  `(NNN) NNN-NNNN`, email local part longer than one character, addresses
+  retaining house numbers
+- `tests/test_scrape_broker_contract.py` — the three brokers expose three
+  different `SummaryResult` shapes bridged by a getattr chain in
+  `sequence_runner.py`; asserts no populated field silently becomes `""`
+- `tests/data_quality.py` — shared assertions
+- `tests/fixtures/{anywho,fps,npd}/` — real captured broker HTML
+
+## Open items
+
+1. **NPD returns NO_RESULTS for 13/17 profiles.** Extraction is verified correct
+   (the 4 that return are 100% populated), so this is either genuine coverage or
+   an over-strict city/state URL filter. Try the same names without the city
+   segment before concluding NPD is thin.
+2. **AnyWho match quality.** For `oehring`, AnyWho returns a 37-year-old "James
+   A Oehring" in Kansas City whose AKA is "James Allen Oehring Jr." — likely the
+   son, not the 61/62-year-old in Cameron that FPS and NPD return. Dedup must
+   not merge them.
+3. **Pre-existing broken test:** `tests/test_scrape_runner.py` imports
+   `transform_fps_result`, but `scrape_result_transformer.py` defines
+   `transform_fps_response`. It fails at collection and is excluded above.
+   Untouched here — it predates this work.
+4. **No DB schema is being validated against yet.** Current bar is "complete and
+   untruncated, matching what the broker page shows". When a target schema
+   exists, extend `tests/data_quality.py` to assert the destination contract.
 
 ---
 
-## Debugging Tips
+## What the original handoff got wrong
 
-**If phones are truncated:** Check AnyWho extraction, data-content reconstruction, phone regex
-**If email/alias fields blank:** Verify broker extraction includes them, SummaryResult initialization correct
-**If CSV corrupt:** Check write mode (w, not a), fieldnames, no duplicate headers
-**If data disappears:** Check CSV writer isn't overwriting rows
+Preserved for reference — **do not act on this.**
 
----
+It claimed: *"HTML extraction working ✅ / CSV parsing broken ❌ — the
+extraction logic is solid, this is just a data aggregation/formatting issue.
+Go fix the CSV."* It ranked "Context.dev API response parsing" last of four
+hypotheses.
 
-## Quick Reference
+That was inverted. The CSV writer was always correct — it opens `'w'`, calls
+`writeheader()` once, and uses `DictWriter` properly; it wrote faithfully what
+it was handed. The evidence pointing at extraction was already visible in the
+sample output:
 
-**Test data:** 17 hardcoded profiles in test_all_17_profiles.py (all known people)
-**Output:** `/Users/jameso/Downloads/Test_Profiles_-_detailed_results.csv`
-**Brokers tested:** FPS, NPD, AnyWho (Phase 1 summary scrapers only)
-**Expected runtime:** ~52 seconds for full test
-
----
-
-## Success Outcome
-
-When you complete this:
-1. ✅ CSV parsing issue identified and fixed
-2. ✅ All fields (age, address, phone, email, aliases, relatives) populate correctly
-3. ✅ 17-person test re-run produces clean, complete results
-4. ✅ Results available for spot-checking
-5. ✅ JOURNAL.md updated with the fix
-
----
-
-**You have everything you need. The extraction logic is working — this is just a data aggregation/formatting issue. Go fix the CSV.**
+- truncation was *systematic* — every AnyWho phone lost exactly its last four
+  digits; a CSV bug does not clip the same four characters every time
+- emails were *truncated, not blank* (`ja_studly@hotmail.com` →
+  `j@hotmail.com`), which is the same blur boundary
+- addresses lost their house numbers — again the same boundary
+- the "row 29 has an email, row 30 is blank → overwrite bug" reading was a
+  misinterpretation; those are two different result cards from one search

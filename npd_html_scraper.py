@@ -22,8 +22,8 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from context.dev import ContextDev
 
-# Add lab to path for models
-sys.path.insert(0, str(Path(__file__).parent.parent / "vanyshr-scraper-lab"))
+# targets/ models live alongside this module
+sys.path.insert(0, str(Path(__file__).parent))
 
 from targets.npd.models import ScrapeOutput, SummaryResult, Profile
 
@@ -136,6 +136,9 @@ class NPDHtmlScraper:
         soup = BeautifulSoup(html, 'html.parser')
         results = []
 
+        # Parsed once and shared across cards; matched to a card by name below
+        jsonld_person = self._extract_jsonld_person(html)
+
         try:
             # Find all h2 tags
             h2_tags = soup.find_all('h2')
@@ -186,6 +189,20 @@ class NPDHtmlScraper:
                     if street_match:
                         full_address = street_match.group(1)
 
+                # The rendered card shows only name, age and city/state. Phones,
+                # emails, the street address and relatives are published solely
+                # in the page's JSON-LD Person block, so pull them from there.
+                if jsonld_person and self._names_match(name, jsonld_person.get('name', '')):
+                    phone_str = phone_str or self._format_phones(jsonld_person.get('telephone'))
+                    email_str = email_str or self._join_values(jsonld_person.get('email'))
+                    relatives_str = relatives_str or self._join_values(
+                        [r.get('name') for r in jsonld_person.get('relatedTo', [])
+                         if isinstance(r, dict)]
+                    )
+                    jsonld_address = self._current_address(jsonld_person.get('HomeLocation'))
+                    if jsonld_address:
+                        full_address = jsonld_address
+
                 # Create summary result
                 summary = SummaryResult(
                     resultId=f"npd_{len(results)}",
@@ -210,6 +227,70 @@ class NPDHtmlScraper:
             logger.warning(f"Error extracting summary results: {e}")
 
         return results
+
+    @staticmethod
+    def _names_match(card_name: str, jsonld_name: str) -> bool:
+        """Whether a JSON-LD Person describes the person in this result card."""
+        return bool(card_name) and card_name.strip().lower() == (jsonld_name or "").strip().lower()
+
+    @staticmethod
+    def _join_values(values, limit: int = 5) -> str:
+        """Comma-join a JSON-LD list field, dropping blanks and duplicates."""
+        if not values:
+            return ""
+        if isinstance(values, str):
+            values = [values]
+        seen = []
+        for v in values:
+            v = (v or "").strip()
+            if v and v not in seen:
+                seen.append(v)
+        return ', '.join(seen[:limit])
+
+    @classmethod
+    def _format_phones(cls, values, limit: int = 3) -> str:
+        """
+        Normalise JSON-LD phone digits to (XXX) XXX-XXXX.
+
+        NPD publishes bare digit strings ("8166322218") while the other brokers
+        emit formatted numbers; dedup compares these across brokers, so they
+        have to agree on one shape.
+        """
+        if not values:
+            return ""
+        if isinstance(values, str):
+            values = [values]
+        formatted = []
+        for raw in values:
+            digits = re.sub(r'\D', '', str(raw or ""))
+            if len(digits) == 11 and digits.startswith('1'):
+                digits = digits[1:]
+            if len(digits) != 10:
+                continue
+            number = f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+            if number not in formatted:
+                formatted.append(number)
+        return ', '.join(formatted[:limit])
+
+    @staticmethod
+    def _current_address(home_locations) -> str:
+        """Format the current address from a JSON-LD HomeLocation list."""
+        if not isinstance(home_locations, list):
+            return ""
+        places = [p for p in home_locations if isinstance(p, dict)]
+        current = next(
+            (p for p in places if 'current' in (p.get('description') or "").lower()),
+            places[0] if places else None,
+        )
+        if not current:
+            return ""
+        addr = current.get('address') or {}
+        parts = [
+            addr.get('streetAddress', ''),
+            addr.get('addressLocality', ''),
+            addr.get('addressRegion', ''),
+        ]
+        return ', '.join(p.strip() for p in parts if p and p.strip())
 
     def _parse_age_from_text(self, text: str) -> Optional[int]:
         """Extract age from longer text"""

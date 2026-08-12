@@ -27,8 +27,8 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from context.dev import ContextDev
 
-# Add lab to path for models
-sys.path.insert(0, str(Path(__file__).parent.parent / "vanyshr-scraper-lab"))
+# targets/ models live alongside this module
+sys.path.insert(0, str(Path(__file__).parent))
 
 from targets.fps.models import ScrapeOutput, SummaryResult, Profile
 
@@ -161,11 +161,32 @@ class FPSHtmlScraper:
                             location_part = grey_text.split('•')[1].strip()
                             address = location_part
 
-                    # Try to get more detailed address from "Past Addresses" section if available
-                    if not address:
-                        addr_link = card.select_one('a[href*="/address/"]')
-                        if addr_link:
+                    # Prefer the full street address. The address link's visible
+                    # text is only "Cameron, MO"; the street sits in the title
+                    # attribute ("413 Lovers Ln, Cameron MO 64429"), so reading
+                    # link text alone silently drops the house number and street.
+                    addr_link = card.select_one('a[href*="/address/"]')
+                    if addr_link:
+                        street_address = (addr_link.get('title') or '').strip()
+                        # Title is prose: "Property Details and People Search for
+                        # the address 413 Lovers Ln, Cameron MO 64429"
+                        match = re.search(r'address\s+(.+)$', street_address, re.IGNORECASE)
+                        if match:
+                            address = match.group(1).strip()
+                        elif not address:
                             address = addr_link.get_text(strip=True)
+
+                    # Relatives are links under an <h4>Relatives:</h4> heading
+                    relatives = ""
+                    for heading in card.find_all('h4'):
+                        if 'relative' in heading.get_text(strip=True).lower():
+                            names = [
+                                a.get_text(strip=True)
+                                for a in heading.find_parent().find_all('a')
+                                if a.get_text(strip=True)
+                            ]
+                            relatives = ', '.join(names[:5])
+                            break
 
                     # Extract profile URL from the profile link
                     profile_url = ""
@@ -182,7 +203,7 @@ class FPSHtmlScraper:
                         profileUrl=profile_url,
                         email="",
                         aliases="",
-                        relatives=""
+                        relatives=relatives
                     )
 
                     results.append(summary)
