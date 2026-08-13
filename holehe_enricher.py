@@ -1,243 +1,224 @@
 #!/usr/bin/env python3
 """
-Holehe Enricher
+Holehe Enricher — which online services an email address is registered with.
 
-Calls Holehe API to find which online services a person's email is registered with.
-https://holehe.io
+Holehe is an open-source CLI (github.com/megadose/holehe). There is no hosted
+API: the previous version of this module called https://api.holehe.io, a
+hostname that does not resolve, so account enrichment has never worked.
 
-Holehe checks 100+ services: GitHub, LinkedIn, Twitter, Instagram, Facebook, etc.
+It probes ~121 sites using password-recovery behaviour and reports, per site:
+
+    [+] registered   [-] not registered   [x] the site refused to answer
+
+Measured behaviour (121 sites, holehe 1.61, from a residential connection):
+
+  runtime          4-10s per address
+  answered         ~46 of 121 sites (7 hits / 41 not-used / 74 refused)
+  repeatability    identical hit and refusal sets across runs
+  false positives  none -- a fabricated address returned zero hits
+
+A [+] can therefore be trusted. The [x] marker cannot: holehe's runner wraps
+each module in a bare `except Exception` and labels *every* failure "Rate
+limit". Probing the failing modules directly shows two unrelated causes:
+
+  - modules whose site changed shape, which fail deterministically
+    (github and snapchat raise IndexError, pinterest JSONDecodeError)
+  - modules that merely ran out of time in the 121-way concurrent burst;
+    atlassian, amazon, imgur, instagram and adobe all answer normally when
+    run on their own
+
+So the refusals are stale modules and timeouts, not IP blocking -- the figures
+above were measured from a residential connection, and a different host will
+not improve them. Recovering that coverage means patching modules or lowering
+concurrency, not changing where this runs.
+
+Do not pass holehe's -T/--timeout flag: in 1.61 it makes every module fail
+(120 refused in under a second).
+
+Because ~62% of sites do not answer, `services_rate_limited` is reported
+alongside the hits. An empty `services_found` next to a large refusal count
+means "could not determine", never "this address is registered nowhere".
 """
 
 import logging
-from typing import Dict, List, Set, Optional
-import time
-
-import httpx
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class HoleheEnricher:
-    """Enriches emails with service registration data from Holehe"""
+    """Run the holehe CLI against email addresses."""
 
-    # Holehe public API endpoint
-    HOLEHE_API_URL = "https://api.holehe.io/v1/email"
+    # Result lines look like "[+] twitter.com". The trailing legend holehe
+    # prints ("[+] Email used, [-] Email not used, [x] Rate limit") matches the
+    # same prefix, so a domain shape is required to exclude it.
+    RESULT_LINE = re.compile(r'^\[([+\-x])\]\s+([a-z0-9][a-z0-9.-]*\.[a-z]{2,})\s*$')
 
-    # Services to display (most relevant for identity verification)
-    PRIORITY_SERVICES = [
-        "github",
-        "linkedin",
-        "twitter",
-        "instagram",
-        "facebook",
-        "instagram",
-        "pinterest",
-        "tiktok",
-        "snapchat",
-        "reddit",
-        "medium",
-        "discord",
-        "slack",
-        "telegram",
-        "whatsapp",
-    ]
+    EMAIL = re.compile(r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
 
-    def __init__(self, timeout: int = 30):
+    ANSI = re.compile(r'\x1b\[[0-9;]*m')
+
+    def __init__(self, timeout: int = 60, binary: Optional[str] = None):
         """
-        Initialize Holehe enricher.
-
         Args:
-            timeout: HTTP request timeout in seconds
+            timeout: seconds to allow a single run before giving up
+            binary: path to the holehe executable; falls back to $HOLEHE_BIN,
+                    then the project venv, then PATH
         """
         self.timeout = timeout
+        self.binary = binary or self._find_binary()
+        if not self.binary:
+            logger.warning(
+                "holehe executable not found. Install it with "
+                "`.venv-local/bin/pip install holehe` or set HOLEHE_BIN."
+            )
 
-    def enrich_email(self, email: str) -> Optional[Dict[str, any]]:
+    @staticmethod
+    def _find_binary() -> Optional[str]:
+        """Locate the holehe executable."""
+        candidates = [
+            os.environ.get("HOLEHE_BIN"),
+            str(Path(__file__).parent / ".venv-local" / "bin" / "holehe"),
+        ]
+        for candidate in candidates:
+            if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+                return candidate
+        return shutil.which("holehe")
+
+    @property
+    def available(self) -> bool:
+        return bool(self.binary)
+
+    def _result(self, email: str, status: str, **extra) -> Dict[str, Any]:
+        result = {
+            "email": email,
+            "status": status,
+            "services_found": [],
+            "services_checked": 0,
+            "services_rate_limited": 0,
+            "error": None,
+        }
+        result.update(extra)
+        return result
+
+    def enrich_email(self, email: str) -> Dict[str, Any]:
         """
-        Find which services an email is registered with.
+        Check one address.
 
-        Args:
-            email: Email address to check
+        Returns a dict with status one of: success, invalid_email, unavailable,
+        timeout, error.
 
-        Returns:
-            Dict with:
-            {
-                'email': 'user@example.com',
-                'services_found': ['github', 'linkedin', 'twitter'],
-                'total_services': 3,
-                'timestamp': '2026-08-11T...',
-                'status': 'success' | 'failed'
-            }
-            Or None if request failed
+        On success, `services_found` lists the sites the address is registered
+        with, and `services_rate_limited` says how many sites declined to
+        answer -- read them together, since an empty list beside a large
+        rate-limited count means "we could not tell", not "nothing found".
         """
-        if not email or not self._is_valid_email(email):
-            logger.warning(f"Invalid email: {email}")
-            return None
+        email = (email or "").strip().lower()
 
-        logger.info(f"Enriching email with Holehe: {email}")
+        if not self.EMAIL.match(email):
+            return self._result(email, "invalid_email", error="Invalid email address")
+
+        if not self.available:
+            return self._result(email, "unavailable", error="holehe executable not found")
 
         try:
-            # Make request to Holehe API
-            response = httpx.get(
-                self.HOLEHE_API_URL,
-                params={"email": email},
+            completed = subprocess.run(
+                [self.binary, email, "--no-color", "--no-clear"],
+                capture_output=True,
+                text=True,
                 timeout=self.timeout,
-                headers={"User-Agent": "Mozilla/5.0 (Vanyshr Scanner)"},
             )
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Holehe timed out for {email} after {self.timeout}s")
+            return self._result(email, "timeout", error=f"Timed out after {self.timeout}s")
+        except OSError as e:
+            logger.error(f"Holehe failed to run for {email}: {e}")
+            return self._result(email, "error", error=str(e))
 
-            response.raise_for_status()
-            data = response.json()
+        parsed = self.parse_output(completed.stdout or "")
 
-            # Parse response
-            services = self._parse_holehe_response(data)
+        if not parsed["services_checked"]:
+            # No parseable result lines: treat as a failure rather than
+            # reporting an empty list as though the address were clean.
+            detail = (completed.stderr or completed.stdout or "").strip()[:200]
+            logger.error(f"Holehe returned no results for {email}: {detail!r}")
+            return self._result(email, "error", error="No results parsed from holehe output")
 
-            result = {
-                "email": email,
-                "services_found": services,
-                "total_services": len(services),
-                "status": "success",
-            }
-
-            logger.info(
-                f"Found {len(services)} services for {email}: "
-                f"{', '.join(services[:5])}{'...' if len(services) > 5 else ''}"
-            )
-
-            return result
-
-        except httpx.TimeoutException:
-            logger.warning(f"Holehe timeout for {email}")
-            return {
-                "email": email,
-                "services_found": [],
-                "status": "timeout",
-            }
-        except Exception as e:
-            logger.error(f"Error enriching {email} with Holehe: {e}")
-            return {
-                "email": email,
-                "services_found": [],
-                "status": "failed",
-                "error": str(e),
-            }
-
-    def enrich_emails_batch(
-        self, emails: Set[str], delay_between_requests: float = 0.1
-    ) -> Dict[str, Dict]:
-        """
-        Enrich multiple emails with Holehe data.
-
-        Args:
-            emails: Set of email addresses to check
-            delay_between_requests: Delay between API calls (seconds) to avoid rate limiting
-
-        Returns:
-            Dict of {email: enrichment_result}
-        """
-        results = {}
-
-        for i, email in enumerate(sorted(emails)):
-            try:
-                result = self.enrich_email(email)
-                if result:
-                    results[email] = result
-
-                # Respect rate limits
-                if i < len(emails) - 1 and delay_between_requests > 0:
-                    time.sleep(delay_between_requests)
-
-            except Exception as e:
-                logger.error(f"Error enriching {email}: {e}")
-                results[email] = {
-                    "email": email,
-                    "services_found": [],
-                    "status": "failed",
-                    "error": str(e),
-                }
-
-        logger.info(
-            f"Enriched {len(results)} emails. "
-            f"Found services in {sum(1 for r in results.values() if r.get('services_found'))} emails"
+        return self._result(
+            email,
+            "success",
+            services_found=parsed["services_found"],
+            services_checked=parsed["services_checked"],
+            services_rate_limited=parsed["services_rate_limited"],
         )
 
-        return results
-
-    @staticmethod
-    def _parse_holehe_response(data: Dict) -> List[str]:
+    @classmethod
+    def parse_output(cls, stdout: str) -> Dict[str, Any]:
         """
-        Parse Holehe API response and extract service names.
+        Pull the per-site verdicts out of holehe's terminal output.
 
-        Holehe returns format like:
-        {
-            "email": "user@example.com",
-            "results": {
-                "Github": {"exists": True},
-                "LinkedIn": {"exists": True},
-                "Twitter": {"exists": False},
-                ...
-            }
+        Progress bars, the banner and the legend are all interleaved with the
+        results, so lines are matched strictly.
+        """
+        found: List[str] = []
+        checked = 0
+        rate_limited = 0
+
+        for raw_line in (stdout or "").splitlines():
+            line = cls.ANSI.sub("", raw_line).strip()
+            match = cls.RESULT_LINE.match(line)
+            if not match:
+                continue
+
+            marker, service = match.groups()
+            checked += 1
+            if marker == "+":
+                if service not in found:
+                    found.append(service)
+            elif marker == "x":
+                rate_limited += 1
+
+        return {
+            "services_found": sorted(found),
+            "services_checked": checked,
+            "services_rate_limited": rate_limited,
         }
 
-        Args:
-            data: Response JSON from Holehe API
-
-        Returns:
-            List of service names where email is found
+    def enrich_emails_batch(self, emails: List[str]) -> Dict[str, Dict[str, Any]]:
         """
-        services = []
+        Check several addresses in sequence.
 
-        try:
-            results = data.get("results", {})
-
-            if isinstance(results, dict):
-                for service_name, service_data in results.items():
-                    if isinstance(service_data, dict) and service_data.get("exists"):
-                        services.append(service_name.lower())
-
-            # Sort by priority
-            priority_services = [
-                s for s in services if s in HoleheEnricher.PRIORITY_SERVICES
-            ]
-            other_services = [
-                s for s in services if s not in HoleheEnricher.PRIORITY_SERVICES
-            ]
-
-            return sorted(priority_services) + sorted(other_services)
-
-        except Exception as e:
-            logger.warning(f"Error parsing Holehe response: {e}")
-            return []
-
-    @staticmethod
-    def _is_valid_email(email: str) -> bool:
-        """Validate email format"""
-        if not email or not isinstance(email, str):
-            return False
-
-        import re
-
-        pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-        return bool(re.match(pattern, email))
+        Each run takes seconds and makes ~121 outbound requests, so callers
+        should pass a shortlist rather than every address a scrape turned up.
+        """
+        return {email: self.enrich_email(email) for email in emails}
 
 
 def main():
-    """Test Holehe enricher"""
+    """Check addresses from the command line."""
+    import sys
+
+    logging.basicConfig(level=logging.INFO)
     enricher = HoleheEnricher()
+    print(f"holehe binary: {enricher.binary or 'NOT FOUND'}\n")
 
-    # Test with a known email
-    test_emails = {"james@example.com", "test@github.com"}
-
-    print("Testing Holehe enricher...")
-    print()
-
-    for email in test_emails:
+    for email in sys.argv[1:] or ["jaoehring@gmail.com"]:
         result = enricher.enrich_email(email)
-        if result:
-            print(f"Email: {result['email']}")
-            print(f"Status: {result['status']}")
-            print(f"Services found: {result.get('services_found', [])}")
-            print()
+        print(f"{email}: {result['status']}")
+        if result["status"] == "success":
+            print(
+                f"  {len(result['services_found'])} accounts from "
+                f"{result['services_checked'] - result['services_rate_limited']} sites "
+                f"that answered ({result['services_rate_limited']} refused)"
+            )
+            for service in result["services_found"]:
+                print(f"    {service}")
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     main()
