@@ -500,3 +500,22 @@ Created comprehensive handoff package in Vanyshr-mono:
 - All working files copied to mono repo
 
 ---
+
+## Where the scraper-to-database mapping lives
+
+The field-by-field mapping of what each scraper produces to where it is stored
+is **not in this repo**. It lives with the schema it describes:
+
+    vanyshr-mono  docs/scraper-data-flow.md   (branch dev/pilot-scan-db)
+
+It is a schema document in substance -- destination columns, constraints, and
+which fields are queryable versus buried in JSONB -- and sits next to
+`schema.md`, which describes the tables themselves.
+
+**It goes stale from changes made here.** Its producing-side tables were
+generated from `data_models.py` and `targets/*/models.py`, so adding or
+renaming a scraper field will not show up in any diff over there. The
+regeneration command is at the top of that document; run it when the field
+inventory moves.
+
+---
