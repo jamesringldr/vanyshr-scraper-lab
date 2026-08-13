@@ -1,17 +1,34 @@
 #!/usr/bin/env python3
 """
-Leakcheck Enricher
+LeakCheck Enricher — breach exposure for an email address.
 
-Calls Leakcheck API to find data breaches involving an email address.
-https://leakcheck.io
+Uses the free public endpoint, which needs no API key:
 
-Leakcheck aggregates data from 500+ publicly available breaches and data sources.
+    https://leakcheck.io/api/public?check=<email>
+
+It returns which breaches an address appears in, when, and which *types* of
+field leaked -- never the leaked values themselves. That is the right shape for
+showing someone their exposure without handling their credentials.
+
+This endpoint has four behaviours worth knowing about, each of which this
+module handles explicitly (see tests/fixtures/leakcheck/README.md):
+
+  - HTTP status is always 200, including for misses and rate limiting, so the
+    status code cannot be used to detect failure
+  - the rate-limit body is not valid JSON -- it uses Python's `False` instead of
+    `false`, so json.loads() raises exactly when the service is under load
+  - a browser-like User-Agent is required or Cloudflare returns 403
+  - invalid addresses return the same body as genuine misses
+
+Previously this module targeted https://leakcheck.io/api/v2/query, the paid
+tier, and returned nothing without LEAKCHECK_API_KEY set.
 """
 
+import json
 import logging
-import os
-from typing import Dict, List, Set, Optional
+import re
 import time
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -19,267 +36,210 @@ logger = logging.getLogger(__name__)
 
 
 class LeakcheckEnricher:
-    """Enriches emails with breach data from Leakcheck"""
+    """Look up breach exposure for email addresses."""
 
-    # Leakcheck API endpoint
-    LEAKCHECK_API_URL = "https://leakcheck.io/api/v2/query"
+    API_URL = "https://leakcheck.io/api/public"
+
+    # Cloudflare rejects requests without a browser-like agent
+    USER_AGENT = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+
+    # The quota is roughly ten calls per window; batches pace themselves to
+    # stay under it rather than discovering the limit by tripping over it.
+    DEFAULT_BATCH_DELAY = 7.0
+
+    EMAIL = re.compile(r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$')
 
     def __init__(self, api_key: Optional[str] = None, timeout: int = 30):
         """
-        Initialize Leakcheck enricher.
-
         Args:
-            api_key: Leakcheck API key (optional, can also get from LEAKCHECK_API_KEY env var)
-            timeout: HTTP request timeout in seconds
+            api_key: unused; kept so existing callers do not break. The public
+                     endpoint takes no credentials.
+            timeout: HTTP timeout in seconds
         """
-        self.api_key = api_key or os.getenv("LEAKCHECK_API_KEY")
         self.timeout = timeout
+        if api_key:
+            logger.debug("LeakcheckEnricher: api_key ignored, public endpoint takes none")
 
-        if not self.api_key:
-            logger.warning(
-                "No Leakcheck API key provided. "
-                "Leakcheck API requires authentication. "
-                "Set LEAKCHECK_API_KEY environment variable."
-            )
+    # ---- response handling ----------------------------------------------
 
-    def enrich_email(self, email: str) -> Optional[Dict]:
+    @staticmethod
+    def _loads(body: str) -> Optional[Dict[str, Any]]:
         """
-        Find data breaches involving an email.
+        Parse a response body, tolerating the rate-limit reply's invalid JSON.
 
-        Args:
-            email: Email address to check
-
-        Returns:
-            Dict with:
-            {
-                'email': 'user@example.com',
-                'breaches': [
-                    {'name': 'LinkedIn 2021', 'date': '2021-06-01', ...},
-                    {'name': 'Facebook 2019', 'date': '2019-07-15', ...},
-                ],
-                'total_breaches': 2,
-                'status': 'success' | 'failed'
-            }
-            Or None if request failed
+        The rate-limit case is served as {"success": False, ...} -- Python's
+        capitalised False, which json.loads rejects. Rather than let that crash
+        the caller, retry once with the literal corrected.
         """
-        if not email or not self._is_valid_email(email):
-            logger.warning(f"Invalid email: {email}")
+        try:
+            return json.loads(body)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        repaired = re.sub(r'\bFalse\b', 'false', body)
+        repaired = re.sub(r'\bTrue\b', 'true', repaired)
+        repaired = re.sub(r'\bNone\b', 'null', repaired)
+        try:
+            return json.loads(repaired)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(f"Leakcheck: unparseable response: {body[:120]!r}")
             return None
 
-        if not self.api_key:
-            logger.warning(f"No API key for Leakcheck, skipping: {email}")
-            return {
-                "email": email,
-                "breaches": [],
-                "status": "no_auth",
-                "message": "Leakcheck API key not configured",
-            }
+    @classmethod
+    def _is_rate_limited(cls, data: Optional[Dict[str, Any]], body: str) -> bool:
+        error = (data or {}).get("error", "") if isinstance(data, dict) else ""
+        haystack = f"{error} {body}".lower()
+        return "ratelimit" in haystack or "too many requests" in haystack
 
-        logger.info(f"Checking Leakcheck for breaches: {email}")
+    def _result(self, email: str, status: str, **extra) -> Dict[str, Any]:
+        result = {
+            "email": email,
+            "status": status,
+            "breaches": [],
+            "breach_count": 0,
+            "fields_exposed": [],
+            "error": None,
+        }
+        result.update(extra)
+        return result
+
+    # ---- public API ------------------------------------------------------
+
+    def enrich_email(self, email: str) -> Dict[str, Any]:
+        """
+        Look up one address.
+
+        Returns a dict with status one of: success, not_found, invalid_email,
+        rate_limited, timeout, error. Breaches are only present on success.
+        """
+        email = (email or "").strip().lower()
+
+        # An invalid address returns the same body as a genuine miss, so screen
+        # it here to keep the two distinguishable downstream.
+        if not self._is_valid_email(email):
+            logger.debug(f"Leakcheck: skipping invalid address {email!r}")
+            return self._result(email, "invalid_email", error="Invalid email address")
 
         try:
-            # Make request to Leakcheck API
             response = httpx.get(
-                self.LEAKCHECK_API_URL,
-                params={
-                    "email": email,
-                    "type": "email",
-                },
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Vanyshr Scanner)",
-                    "X-API-Key": self.api_key,
-                },
+                self.API_URL,
+                params={"check": email},
+                headers={"User-Agent": self.USER_AGENT, "Accept": "application/json"},
                 timeout=self.timeout,
+                follow_redirects=True,
             )
-
-            # Leakcheck returns 404 if not found (which is good)
-            if response.status_code == 404:
-                logger.info(f"No breaches found for {email}")
-                return {
-                    "email": email,
-                    "breaches": [],
-                    "status": "success",
-                    "found": False,
-                }
-
-            response.raise_for_status()
-            data = response.json()
-
-            # Parse response
-            breaches = self._parse_leakcheck_response(data)
-
-            result = {
-                "email": email,
-                "breaches": breaches,
-                "total_breaches": len(breaches),
-                "status": "success",
-                "found": len(breaches) > 0,
-            }
-
-            if breaches:
-                logger.warning(
-                    f"Found {len(breaches)} breaches for {email}: "
-                    f"{', '.join(b.get('name', 'Unknown')[:20] for b in breaches[:3])}"
-                )
-
-            return result
-
         except httpx.TimeoutException:
             logger.warning(f"Leakcheck timeout for {email}")
-            return {
-                "email": email,
-                "breaches": [],
-                "status": "timeout",
-            }
-        except Exception as e:
-            logger.error(f"Error checking Leakcheck for {email}: {e}")
-            return {
-                "email": email,
-                "breaches": [],
-                "status": "failed",
-                "error": str(e),
-            }
+            return self._result(email, "timeout", error="Request timed out")
+        except httpx.HTTPError as e:
+            logger.error(f"Leakcheck request failed for {email}: {e}")
+            return self._result(email, "error", error=str(e))
+
+        body = response.text or ""
+        data = self._loads(body)
+
+        if self._is_rate_limited(data, body):
+            logger.warning(f"Leakcheck rate limited on {email}")
+            return self._result(email, "rate_limited", error="Rate limited")
+
+        if data is None:
+            return self._result(email, "error", error="Unparseable response")
+
+        # Status is 200 even for failures, so the body decides.
+        if not data.get("success"):
+            return self._result(email, "not_found")
+
+        breaches = self._parse_sources(data.get("sources"))
+        fields = [f for f in (data.get("fields") or []) if isinstance(f, str)]
+
+        return self._result(
+            email,
+            "success",
+            breaches=breaches,
+            # Trust the reported count over len(sources); they can differ when
+            # the API withholds some source names.
+            breach_count=data.get("found") if isinstance(data.get("found"), int) else len(breaches),
+            fields_exposed=sorted(set(fields)),
+        )
 
     def enrich_emails_batch(
-        self, emails: Set[str], delay_between_requests: float = 1.0
-    ) -> Dict[str, Dict]:
+        self,
+        emails: List[str],
+        delay: Optional[float] = None,
+    ) -> Dict[str, Dict[str, Any]]:
         """
-        Check multiple emails for breaches.
+        Look up several addresses, pacing calls to stay inside the quota.
 
-        Args:
-            emails: Set of email addresses to check
-            delay_between_requests: Delay between API calls (seconds) to avoid rate limiting
-
-        Returns:
-            Dict of {email: breach_result}
+        Stops early once rate limited: continuing would only return more
+        rate-limit responses and mask which addresses were genuinely checked.
         """
-        results = {}
+        delay = self.DEFAULT_BATCH_DELAY if delay is None else delay
+        results: Dict[str, Dict[str, Any]] = {}
 
-        for i, email in enumerate(sorted(emails)):
-            try:
-                result = self.enrich_email(email)
-                if result:
-                    results[email] = result
+        for index, email in enumerate(emails):
+            if index:
+                time.sleep(delay)
 
-                # Respect rate limits (Leakcheck may have strict limits)
-                if i < len(emails) - 1 and delay_between_requests > 0:
-                    time.sleep(delay_between_requests)
+            result = self.enrich_email(email)
+            results[email] = result
 
-            except Exception as e:
-                logger.error(f"Error checking {email}: {e}")
-                results[email] = {
-                    "email": email,
-                    "breaches": [],
-                    "status": "failed",
-                    "error": str(e),
-                }
-
-        breach_count = sum(
-            r.get("total_breaches", 0)
-            for r in results.values()
-            if r.get("status") == "success"
-        )
-        affected_count = sum(
-            1
-            for r in results.values()
-            if r.get("status") == "success" and r.get("found")
-        )
-
-        logger.info(
-            f"Checked {len(results)} emails. "
-            f"Found {affected_count} emails in {breach_count} total breaches"
-        )
+            if result["status"] == "rate_limited":
+                logger.warning(
+                    f"Leakcheck rate limited after {index} of {len(emails)} addresses; "
+                    f"stopping so the remainder are not misreported as checked"
+                )
+                break
 
         return results
 
-    @staticmethod
-    def _parse_leakcheck_response(data: Dict) -> List[Dict]:
-        """
-        Parse Leakcheck API response and extract breach information.
-
-        Leakcheck returns format like:
-        {
-            "result": [
-                {
-                    "name": "LinkedIn",
-                    "date": 1623265200,
-                    "sources": ["..."],
-                    ...
-                },
-                ...
-            ]
-        }
-
-        Args:
-            data: Response JSON from Leakcheck API
-
-        Returns:
-            List of breach dicts
-        """
-        breaches = []
-
-        try:
-            results = data.get("result", [])
-
-            if isinstance(results, list):
-                for breach in results:
-                    if isinstance(breach, dict):
-                        breach_info = {
-                            "name": breach.get("name", "Unknown"),
-                            "date": breach.get("date"),
-                            "source": breach.get("source", "leakcheck"),
-                        }
-                        breaches.append(breach_info)
-
-            # Sort by date (most recent first)
-            breaches.sort(key=lambda x: x.get("date") or 0, reverse=True)
-
-            return breaches
-
-        except Exception as e:
-            logger.warning(f"Error parsing Leakcheck response: {e}")
+    @classmethod
+    def _parse_sources(cls, sources: Any) -> List[Dict[str, str]]:
+        """Normalise the sources list into {source, date, year} records."""
+        if not isinstance(sources, list):
             return []
 
-    @staticmethod
-    def _is_valid_email(email: str) -> bool:
-        """Validate email format"""
-        if not email or not isinstance(email, str):
-            return False
+        breaches: List[Dict[str, str]] = []
+        seen = set()
+        for entry in sources:
+            if not isinstance(entry, dict):
+                continue
+            name = (entry.get("name") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
 
-        import re
+            date = (entry.get("date") or "").strip()
+            year = date[:4] if re.match(r'^\d{4}', date) else ""
+            breaches.append({"source": name, "date": date, "year": year})
 
-        pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-        return bool(re.match(pattern, email))
+        # Most recent first: an old breach matters less than a recent one
+        return sorted(breaches, key=lambda b: b["date"], reverse=True)
+
+    @classmethod
+    def _is_valid_email(cls, email: str) -> bool:
+        return bool(email) and bool(cls.EMAIL.match(email))
 
 
 def main():
-    """Test Leakcheck enricher"""
+    """Check a couple of addresses from the command line."""
+    import sys
+
+    logging.basicConfig(level=logging.INFO)
     enricher = LeakcheckEnricher()
 
-    print("Leakcheck enricher initialized")
-    print(f"API Key configured: {bool(enricher.api_key)}")
-    print()
-
-    if not enricher.api_key:
-        print("⚠️  No Leakcheck API key - cannot check for breaches")
-        print("Set LEAKCHECK_API_KEY environment variable to enable")
-        print()
-        print("Get free API key from: https://leakcheck.io")
-        return
-
-    # Test with a known email
-    test_email = "test@example.com"
-    result = enricher.enrich_email(test_email)
-
-    if result:
-        print(f"Email: {result['email']}")
-        print(f"Status: {result['status']}")
-        print(f"Breaches found: {result.get('total_breaches', 0)}")
-        if result.get("breaches"):
-            for breach in result["breaches"][:3]:
-                print(f"  - {breach.get('name')}")
+    emails = sys.argv[1:] or ["jaoehring@gmail.com"]
+    for email in emails:
+        result = enricher.enrich_email(email)
+        print(f"\n{email}: {result['status']}")
+        if result["status"] == "success":
+            print(f"  {result['breach_count']} breaches")
+            print(f"  exposed: {', '.join(result['fields_exposed'])}")
+            for breach in result["breaches"]:
+                print(f"    {breach['date']}  {breach['source']}")
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     main()
