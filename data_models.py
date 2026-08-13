@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional
 from enum import Enum
 
+from address_parse import parse_address
+
 
 class BrokerName(str, Enum):
     """Supported brokers"""
@@ -33,6 +35,10 @@ class SummaryResult:
     email: str = ""  # Comma-separated emails
     aliases: str = ""  # Comma-separated aliases/AKAs
     relatives: str = ""  # Comma-separated relative names
+    # Semicolon-separated former addresses. Matching on these matters: brokers
+    # disagree about which address is current, and a prior address is often the
+    # only thing linking one broker's record to another's.
+    previous_addresses: str = ""
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON"""
@@ -49,6 +55,7 @@ class SummaryResult:
             'email': self.email,
             'aliases': self.aliases,
             'relatives': self.relatives,
+            'previous_addresses': self.previous_addresses,
         }
 
 
@@ -94,17 +101,23 @@ class DedupGroup:
 
     @property
     def primary_city(self) -> str:
-        """Get city from first member"""
-        return self.members[0].summary.address.split(',')[0].strip() if self.members and ',' in self.members[0].summary.address else ""
+        """
+        City of the first member.
+
+        Parsed rather than split on commas: with full street addresses the old
+        heuristic returned the street, so this field reached the database as
+        "413 Lovers Ln".
+        """
+        if not self.members:
+            return ""
+        return parse_address(self.members[0].summary.address)["city"].title()
 
     @property
     def primary_state(self) -> str:
-        """Get state from first member"""
-        if self.members and self.members[0].summary.address:
-            parts = self.members[0].summary.address.split(',')
-            if len(parts) >= 2:
-                return parts[-1].strip()
-        return ""
+        """State of the first member, as a two-letter abbreviation."""
+        if not self.members:
+            return ""
+        return parse_address(self.members[0].summary.address)["state"].upper()
 
     def resolve_age(self) -> Optional[int]:
         """Get most common age (median)"""

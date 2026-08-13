@@ -26,7 +26,8 @@ class SummaryResult:
     phone: str = ""      # Comma-separated
     email: str = ""      # Comma-separated
     aliases: str = ""    # Comma-separated
-    relatives: str = ""  # Comma-separated
+    relatives: str = ""
+    previousAddresses: str = ""  # Semicolon-separated former addresses
 
 
 @dataclass

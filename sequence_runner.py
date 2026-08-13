@@ -289,6 +289,7 @@ class SequenceRunner:
                         email=getattr(summary, 'email', ''),
                         aliases=getattr(summary, 'aliases', ''),
                         relatives=getattr(summary, 'relatives', ''),
+                        previous_addresses=getattr(summary, 'previousAddresses', ''),
                     )
                     summary_results.append(sr)
 

@@ -519,3 +519,63 @@ regeneration command is at the top of that document; run it when the field
 inventory moves.
 
 ---
+
+## Deferred: broker quality analysis, to run with risk calibration
+
+When the full-profile sweep exists (profiles + LeakCheck + Holehe, with the
+correct person selected per broker), that same dataset answers a second
+question beyond risk-score calibration: **which brokers are actually worth
+running, and for what.**
+
+Do both analyses off one sweep. The scores and the broker comparison need the
+same inputs, and running the sweep twice costs real money.
+
+### 1. Per data type — is the data any good
+
+For each data type, across all brokers:
+
+- **fill rate** — how often is it present at all
+- **completeness** — truncated values, missing components (a phone without its
+  last four, an email with a one-character local part, an address without a
+  house number). The assertions in `tests/data_quality.py` already encode what
+  "complete" means; reuse them as measures rather than pass/fail
+- **validity** — plausible on its face (well-formed phone, resolvable domain)
+- **agreement** — when two brokers report the same field for the same person,
+  do they match? Age is the known offender: 61 / 62 / 37 / 37 for one person.
+  Worth knowing whether phones and addresses agree as reliably as they appeared
+  to on a single record
+
+### 2. Per broker — holistically
+
+- **recall** — of the test profiles, how many did this broker find at all.
+  Known so far from a 5-profile Phase 1 sweep: Zaba missed 1, AnyWho 2, NPD 4
+- **precision** — of the results returned, how many are the right person. Needs
+  the labelled expected-profile set, which is a prerequisite for Phase 2
+  testing anyway
+- **richness** — average number of populated data types per person
+- **uniqueness** — what does this broker provide that no other does. Zaba is
+  the only source of phone line type, carrier, county and coordinates; NPD
+  returned the most emails; AnyWho the deepest address history
+- **cost per useful record** — calls made against records that turned out to be
+  the right person
+
+### 3. Data type by broker — the cross-tab
+
+The one that actually drives sequencing decisions: **which broker to trust for
+which field.** A table of broker × data type, scored on fill rate and
+completeness, e.g. best source of phone numbers, of emails, of relatives, of
+address history.
+
+This feeds three things directly:
+- consolidation precedence — whose value wins when brokers disagree
+- fallback logic — if the best source for a field misses, who is second
+- whether a broker earns its call at all, or only for one or two fields
+
+### Prerequisites
+
+1. `run_summary_test.py` writes incrementally and bounds its timeout — **done**
+2. `expected_profile_url` (or the broker's stable id) added to the test CSV, so
+   Phase 2 fetches the right person rather than a stranger
+3. A sweep covering full profiles, LeakCheck and Holehe, not just Phase 1
+
+---

@@ -149,6 +149,7 @@ class AnyWhoHtmlScraper:
                 email_str = ""
                 aliases_str = ""
                 relatives_str = ""
+                previous_str = ""
 
                 # Extract age from the h2 header line (format: "Name, Age 34")
                 # The age span also contains an <svg>, which makes bs4's `string=`
@@ -181,7 +182,18 @@ class AnyWhoHtmlScraper:
                     section_content = re.sub(r'\s+', ' ', section_content).strip()
 
                     # Extract by section type
-                    if 'LIVES IN' in label:
+                    if 'USED TO LIVE' in label:
+                        # Address history. Brokers disagree about which address
+                        # is current, and a former address is often the only
+                        # thing linking one broker's record to another's --
+                        # 413 Lovers Ln appears here for a person the other
+                        # three brokers list as currently living there.
+                        previous_str = '; '.join(
+                            self._join_section(section_content.split('•')).split(', ')[:0]
+                            or [p.strip() for p in section_content.split('•')
+                                if p.strip() and not self.MORE_AFFORDANCE.match(p.strip())][:5]
+                        )
+                    elif 'LIVES IN' in label:
                         # Current address - take just the first line
                         address = section_content.split('•')[0].strip()[:150]
                     elif 'PHONE' in label:
@@ -216,7 +228,8 @@ class AnyWhoHtmlScraper:
                     phone=phone_str,
                     email=email_str,
                     aliases=aliases_str,
-                    relatives=relatives_str  # type: ignore
+                    relatives=relatives_str,  # type: ignore
+                    previousAddresses=previous_str
                 )
 
                 if summary.fullName:

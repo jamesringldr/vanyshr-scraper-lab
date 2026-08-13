@@ -309,6 +309,11 @@ class ZabaHtmlScraper:
             email=', '.join(profile.emailAddresses),
             aliases=', '.join(profile.aliases),
             relatives=', '.join(r['name'] for r in profile.relatives),
+            # Zaba returns full profiles at Phase 1, so its address history is
+            # available for matching without a second fetch.
+            previousAddresses='; '.join(
+                a.get('formatted', '') for a in profile.pastAddresses if a.get('formatted')
+            ),
         )
 
     # ---- entry point -----------------------------------------------------

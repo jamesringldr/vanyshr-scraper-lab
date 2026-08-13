@@ -21,6 +21,7 @@ class SummaryResult:
     email: str = ""
     aliases: str = ""
     relatives: str = ""
+    previousAddresses: str = ""  # Semicolon-separated former addresses
 
 
 @dataclass
