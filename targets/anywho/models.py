@@ -30,6 +30,7 @@ class Profile:
     fullName: str = ""
     age: Optional[int] = None
     currentAddress: Dict[str, str] = field(default_factory=dict)
+    previousAddresses: List[Dict[str, str]] = field(default_factory=list)
     phoneNumbers: List[Dict[str, str]] = field(default_factory=list)
     emailAddresses: List[str] = field(default_factory=list)
     familyMembers: List[Dict[str, Any]] = field(default_factory=list)

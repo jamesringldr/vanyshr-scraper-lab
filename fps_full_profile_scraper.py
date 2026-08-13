@@ -17,12 +17,30 @@ from bs4 import BeautifulSoup
 from context.dev import ContextDev
 
 from targets.fps.models import Profile
+from jsonld_profile import (
+    extract_person,
+    format_phones,
+    related_names,
+    split_home_locations,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class FPSFullProfileScraper:
     """Scrapes full profiles from FastPeopleSearch using context.dev HTML method"""
+
+    MAX_RELATIVES = 10
+    MAX_EMAILS = 10
+
+    # The site's own addresses, plus anything that signals a non-personal mailbox
+    EXCLUDED_EMAIL_FRAGMENTS = (
+        'fastpeoplesearch.com', 'support@', 'noreply@', 'no-reply@',
+        'admin@', 'info@', 'notifications@', 'example.com', 'sentry.io',
+    )
+
+    # Sprite filenames such as "linkedin@2x.a7ffbfd3.png" match an email regex
+    ASSET_EXTENSIONS = ('png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'css', 'js')
 
     def __init__(self, api_key: Optional[str] = None):
         """Initialize with context.dev client"""
@@ -65,233 +83,147 @@ class FPSFullProfileScraper:
             return None
 
     def _parse_profile_html(self, html: str, profile_id: str) -> Optional[Profile]:
-        """Parse full profile HTML and extract data"""
-        soup = BeautifulSoup(html, "html.parser")
+        """
+        Parse a full profile page.
 
+        Reads the schema.org Person block rather than regexing the page. The
+        previous implementation matched phone patterns against raw HTML, which
+        also matched the digits inside the profile URL id -- turning
+        /james-oehring_id_G3697305023830937972 into "(369) 730-5023".
+        """
         try:
+            person = extract_person(html)
+            if not person:
+                logger.warning("No JSON-LD Person block on FPS profile page")
+                return None
+
+            soup = BeautifulSoup(html, "html.parser")
             profile = Profile(profileId=profile_id)
 
-            # Extract name - use same pattern as summary scraper (h3.card-title a span.larger)
-            name_elem = soup.select_one("h3.card-title a span.larger, h1, .profile-name")
-            if name_elem:
-                full_text = name_elem.get_text(strip=True)
-                # Clean up: extract just the name part (before location info)
-                # The element might contain name + city info concatenated
-                # Try to find where the name ends (usually stops before " in " with word boundary)
-                import re as regex
-                # Match: FirstName LastName (stops at location separators)
-                name_match = regex.match(r'^([A-Za-z\s\-\.\']+?)(?:\s*[,(]|\s+in\s+)', full_text)
-                if name_match:
-                    profile.fullName = name_match.group(1).strip()
-                else:
-                    # Fallback: split on common separators
-                    for sep in ['(', ',']:
-                        if sep in full_text:
-                            full_text = full_text.split(sep)[0].strip()
-                    profile.fullName = full_text
+            profile.fullName = (person.get("name") or "").strip()
+            if not profile.fullName:
+                given = (person.get("givenName") or "").strip()
+                family = (person.get("familyName") or "").strip()
+                profile.fullName = " ".join(p for p in (given, family) if p)
 
-            # Extract age
-            age_text = soup.get_text()
-            age_match = re.search(r"Age\s+(\d+)", age_text)
-            if age_match:
-                profile.age = int(age_match.group(1))
-
-            # Extract emails
-            emails = self._extract_emails(html)
-            profile.emailAddresses = list(emails)
-
-            # Extract phone numbers
-            phones = self._extract_phones(html)
-            for phone in phones:
-                profile.phoneNumbers.append({"number": phone, "type": "unknown"})
-
-            # Extract addresses
-            profile.currentAddress, profile.previousAddresses = self._extract_addresses(
-                soup
+            profile.age = self._extract_age(soup)
+            profile.phoneNumbers = format_phones(person.get("telephone"))
+            profile.relatives = related_names(person.get("relatedTo"), limit=self.MAX_RELATIVES)
+            profile.currentAddress, profile.previousAddresses = split_home_locations(
+                person.get("homeLocation")
             )
-
-            # Extract relatives
-            profile.relatives = self._extract_relatives(soup)
-
-            # Extract associates
-            profile.associates = self._extract_associates(soup)
-
-            # Extract properties
-            profile.properties = self._extract_properties(soup)
+            # FPS publishes only the current homeLocation in JSON-LD; the past
+            # addresses live in the rendered page.
+            profile.previousAddresses.extend(
+                self._extract_previous_addresses(soup, profile.currentAddress)
+            )
+            profile.emailAddresses = self._extract_emails(html)
 
             logger.debug(
-                f"Parsed profile: {profile.fullName}, "
+                f"Parsed FPS profile: {profile.fullName}, "
                 f"{len(profile.emailAddresses)} emails, "
-                f"{len(profile.phoneNumbers)} phones"
+                f"{len(profile.phoneNumbers)} phones, "
+                f"{len(profile.relatives)} relatives"
             )
 
             return profile if profile.fullName else None
 
         except Exception as e:
-            logger.error(f"Error parsing profile HTML: {e}", exc_info=True)
+            logger.error(f"Error parsing FPS profile HTML: {e}", exc_info=True)
             return None
 
-    def _extract_emails(self, html: str) -> set:
-        """Extract email addresses from HTML"""
-        email_pattern = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
-        emails = set(re.findall(email_pattern, html.lower()))
+    # Link titles read "Search people who live at 1225 Union AVE, Unit 502,
+    # Kansas City MO 64101" -- wording varies ("living at", "at the address"),
+    # so the address is taken as everything after the last " at ".
+    ADDRESS_TITLE = re.compile(r'\bat (?:the address )?(.+)$', re.IGNORECASE)
+    ADDRESS_PARTS = re.compile(
+        r"^(.*),\s*([A-Za-z .'\-]+?)\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$"
+    )
 
-        # Filter out system/service emails
-        system_domains = {
-            'fastpeoplesearch.com',
-            'support@',
-            'noreply@',
-            'no-reply@',
-            'admin@',
-            'info@',
-            'notifications@',
-        }
+    @classmethod
+    def _address_key(cls, address: Dict[str, str]) -> str:
+        """Identity of an address, ignoring case and punctuation."""
+        street = (address.get("street") or "").lower().replace(".", "")
+        return re.sub(r'\s+', ' ', street).strip()
 
-        filtered = set()
-        for email in emails:
-            # Skip if it's a system email
-            if any(domain in email for domain in system_domains):
-                continue
-            filtered.add(email)
+    @classmethod
+    def _extract_previous_addresses(cls, soup, current: Dict[str, str]) -> List[Dict[str, str]]:
+        """
+        Past addresses from the "Previous Addresses" section.
 
-        return filtered
+        The visible link text is only the city and state; the full street
+        address is in the anchor's title attribute, same as on the search page.
+        """
+        section = soup.select_one('#previous-addresses')
+        if not section:
+            return []
 
-    def _extract_phones(self, html: str) -> List[str]:
-        """Extract phone numbers from HTML"""
-        # US phone number patterns: (123) 456-7890, 123-456-7890, 1234567890
-        phone_pattern = r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}"
-        matches = re.findall(phone_pattern, html)
+        current_key = cls._address_key(current)
+        addresses: List[Dict[str, str]] = []
+        seen = {current_key} if current_key else set()
 
-        phones = []
-        seen = set()
-
-        for match in matches:
-            # Normalize: remove all non-digits, then format as (XXX) XXX-XXXX
-            digits = re.sub(r"\D", "", match)
-            if len(digits) == 10 and digits not in seen:
-                formatted = f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
-                phones.append(formatted)
-                seen.add(digits)
-
-        return phones[:3]  # Limit to top 3
-
-    def _extract_addresses(
-        self, soup: BeautifulSoup
-    ) -> tuple[Dict[str, str], List[Dict[str, str]]]:
-        """Extract current and previous addresses"""
-        current_address = {}
-        previous_addresses = []
-
-        # Look for "Current Address" and "Past Addresses" sections
-        # Try multiple selectors to handle page structure variations
-        address_links = soup.select('a[href*="/address/"], [class*="address"] a')
-
-        if not address_links:
-            # Fallback: look for any divs with address-like content
-            address_sections = soup.select('[class*="address"], [class*="location"]')
-        else:
-            address_sections = address_links
-
-        for i, section in enumerate(address_sections[:5]):  # Limit to 5 addresses
-            if isinstance(section, str):
-                addr_text = section
-            else:
-                addr_text = section.get_text(strip=True)
-
-            if not addr_text or len(addr_text) < 5:
+        for link in section.find_all('a', href=re.compile(r'/address/')):
+            title = (link.get('title') or '').strip()
+            match = cls.ADDRESS_TITLE.search(title)
+            if not match:
                 continue
 
-            addr_dict = {"formatted": addr_text}
-
-            if i == 0:
-                current_address = addr_dict
+            formatted = re.sub(r'\s+', ' ', match.group(1)).strip()
+            parts = cls.ADDRESS_PARTS.match(formatted)
+            if parts:
+                street, city, state, postal = parts.groups()
+                address = {
+                    "street": street.strip(),
+                    "city": city.strip(),
+                    "state": state,
+                    "postalCode": postal,
+                    "formatted": formatted,
+                }
             else:
-                previous_addresses.append(addr_dict)
+                address = {"formatted": formatted}
 
-        return current_address, previous_addresses
+            key = cls._address_key(address) or formatted.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            addresses.append(address)
 
-    def _extract_relatives(self, soup: BeautifulSoup) -> List[Dict[str, str]]:
-        """Extract relatives from profile"""
-        relatives = []
+        return addresses
 
-        # Look for relatives section
-        rel_header = soup.find(string=re.compile(r"Relatives?", re.I))
-        if rel_header:
-            # Find parent container with list
-            container = rel_header.find_parent("div")
-            if container:
-                # Extract names from list items
-                for li in container.select("li, [class*='relative']"):
-                    name = li.get_text(strip=True)
-                    if name and len(name) > 2:
-                        relatives.append({"name": name, "relationship": "family"})
+    @staticmethod
+    def _extract_age(soup) -> Optional[int]:
+        """
+        Read the age from the profile header.
 
-        return relatives[:5]  # Limit to 5
+        Scoped to the header because "Age NN" appears repeatedly further down
+        the page for relatives and neighbours.
+        """
+        header = soup.select_one("#details-summary, .details-summary, h1")
+        region = header.parent if header and header.parent else soup
+        match = re.search(r"Age\s+(\d{1,3})", region.get_text(" ", strip=True))
+        if match:
+            age = int(match.group(1))
+            return age if 0 < age < 150 else None
+        return None
 
-    def _extract_associates(self, soup: BeautifulSoup) -> List[Dict[str, str]]:
-        """Extract associates/neighbors from profile"""
-        associates = []
+    def _extract_emails(self, html: str) -> List[str]:
+        """
+        Collect personal email addresses from the page.
 
-        # Look for associates section
-        assoc_header = soup.find(string=re.compile(r"Associates?|Neighbors?", re.I))
-        if assoc_header:
-            # Find parent container
-            container = assoc_header.find_parent("div")
-            if container:
-                # Extract names
-                for li in container.select("li, [class*='associate']"):
-                    name = li.get_text(strip=True)
-                    if name and len(name) > 2:
-                        associates.append({"name": name})
+        FPS does not publish emails in JSON-LD, so this reads the rendered page
+        and drops the site's own addresses and any asset filename that happens
+        to contain an @ (sprite images like "linkedin@2x.a7ffbfd3.png" parse as
+        valid addresses otherwise).
+        """
+        found = re.findall(r"[a-zA-Z0-9._%%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", html)
 
-        return associates[:5]  # Limit to 5
-
-    def _extract_properties(self, soup: BeautifulSoup) -> List[Dict[str, Any]]:
-        """Extract properties (real estate) from profile"""
-        properties = []
-
-        # Look for property section
-        prop_header = soup.find(string=re.compile(r"Properties?|Real Estate", re.I))
-        if prop_header:
-            # Find parent container
-            container = prop_header.find_parent("div")
-            if container:
-                # Extract property addresses
-                for prop in container.select("[class*='property'], li"):
-                    prop_text = prop.get_text(strip=True)
-                    if prop_text and len(prop_text) > 10:
-                        properties.append({"address": prop_text})
-
-        return properties[:5]  # Limit to 5
-
-
-def main():
-    """Test full profile scraper"""
-    import os
-
-    api_key = os.getenv("CONTEXT_DEV_API_KEY")
-    if not api_key:
-        print("❌ CONTEXT_DEV_API_KEY not set")
-        return
-
-    scraper = FPSFullProfileScraper(api_key=api_key)
-
-    # Test with a profile URL (from Phase 1 results)
-    profile_url = "/james-oehring_id_G3697305023830937972"
-
-    profile = scraper.scrape_profile(profile_url)
-
-    if profile:
-        print(f"✅ Profile scraped: {profile.fullName}")
-        print(f"   Age: {profile.age}")
-        print(f"   Emails: {profile.emailAddresses}")
-        print(f"   Phones: {[p['number'] for p in profile.phoneNumbers]}")
-        print(f"   Current Address: {profile.currentAddress}")
-        print(f"   Relatives: {len(profile.relatives)}")
-    else:
-        print("❌ Failed to scrape profile")
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    main()
+        emails: List[str] = []
+        for email in found:
+            email = email.lower()
+            if any(bad in email for bad in self.EXCLUDED_EMAIL_FRAGMENTS):
+                continue
+            if email.rsplit(".", 1)[-1] in self.ASSET_EXTENSIONS:
+                continue
+            if email not in emails:
+                emails.append(email)
+        return emails[: self.MAX_EMAILS]

@@ -1,0 +1,314 @@
+"""
+Data-quality tests for the three full-profile scrapers.
+
+These previously ran regexes across the whole page, which invented values that
+looked entirely real once stored:
+
+  FPS     (369) 730-5023  -- digits from the profile URL id G3697305023830937972
+  AnyWho  (626) 555-5555  -- a form's placeholder attribute
+  AnyWho  linkedin@2x.a7ffbfd3.png -- a sprite filename matching an email regex
+  NPD     (611) 503-8382  -- a digit run appearing nowhere as a phone number
+
+A truncated value is visibly wrong; a fabricated phone number is not. So the
+central assertion here is that every extracted value can be corroborated
+against the page, and that the specific fabrications above never reappear.
+
+FPS and NPD now read their schema.org Person block; AnyWho has none and is
+parsed from its rendered cards.
+"""
+
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from anywho_full_profile_scraper import AnyWhoFullProfileScraper  # noqa: E402
+from fps_full_profile_scraper import FPSFullProfileScraper  # noqa: E402
+from npd_full_profile_scraper import NPDFullProfileScraper  # noqa: E402
+from data_quality import FULL_PHONE, assert_street_address  # noqa: E402
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+pytestmark = pytest.mark.unit
+
+# Values the old implementations invented; none may ever come back
+FABRICATED = {
+    "(369) 730-5023", "(018) 340-6007", "(626) 555-5555",
+    "(611) 503-8382", "(414) 640-2143", "(701) 104-6249",
+}
+
+
+def load(broker, name):
+    return (FIXTURES / broker / f"{name}_profile.html").read_text()
+
+
+@pytest.fixture(scope="module")
+def fps():
+    return FPSFullProfileScraper(api_key="test-dummy")._parse_profile_html(
+        load("fps", "james_oehring_mo"), "pid"
+    )
+
+
+@pytest.fixture(scope="module")
+def npd():
+    return NPDFullProfileScraper(api_key="test-dummy")._parse_profile_html(
+        load("npd", "james_oehring_mo"), "pid"
+    )
+
+
+@pytest.fixture(scope="module")
+def anywho():
+    return AnyWhoFullProfileScraper(api_key="test-dummy")._parse_profile_html(
+        load("anywho", "james_oehring_mo"), "pid"
+    )
+
+
+class TestNoFabrication:
+    """No value may appear that isn't on the page."""
+
+    def test_all_parsers_return_a_profile(self, fps, npd, anywho):
+        assert fps and npd and anywho
+
+    @pytest.mark.parametrize("broker", ["fps", "npd", "anywho"])
+    def test_no_known_fabricated_phone(self, broker, fps, npd, anywho):
+        profile = {"fps": fps, "npd": npd, "anywho": anywho}[broker]
+        numbers = {p["number"] for p in profile.phoneNumbers}
+        assert not (numbers & FABRICATED), f"{broker} reintroduced a fabricated number"
+
+    @pytest.mark.parametrize("broker", ["fps", "npd", "anywho"])
+    def test_every_phone_is_well_formed(self, broker, fps, npd, anywho):
+        profile = {"fps": fps, "npd": npd, "anywho": anywho}[broker]
+        for phone in profile.phoneNumbers:
+            assert FULL_PHONE.match(phone["number"]), f"{broker}: {phone}"
+
+    @pytest.mark.parametrize("broker", ["fps", "npd", "anywho"])
+    def test_phones_appear_in_the_source(self, broker, fps, npd, anywho):
+        """
+        The strongest check: every number must be traceable to the page.
+
+        AnyWho blurs its numbers across data-content attributes, so the digits
+        never appear literally in the markup -- that page is checked against
+        its reconstructed text instead.
+        """
+        profile = {"fps": fps, "npd": npd, "anywho": anywho}[broker]
+        html = load(broker, "james_oehring_mo")
+
+        if broker == "anywho":
+            from bs4 import BeautifulSoup
+
+            scraper = AnyWhoFullProfileScraper(api_key="t")
+            haystack = scraper._card_text(BeautifulSoup(html, "html.parser"), "Phone Numbers")
+        else:
+            haystack = html
+
+        flattened = haystack.replace("-", "").replace("(", "").replace(")", "").replace(" ", "")
+        for phone in profile.phoneNumbers:
+            digits = "".join(c for c in phone["number"] if c.isdigit())
+            assert digits in flattened, \
+                f"{broker}: {phone['number']} does not occur in the page"
+
+    @pytest.mark.parametrize("broker", ["fps", "npd", "anywho"])
+    def test_no_asset_filenames_stored_as_emails(self, broker, fps, npd, anywho):
+        profile = {"fps": fps, "npd": npd, "anywho": anywho}[broker]
+        for email in profile.emailAddresses:
+            assert not email.rsplit(".", 1)[-1] in (
+                "png", "jpg", "jpeg", "gif", "svg", "webp", "css", "js"
+            ), f"{broker}: asset filename stored as email: {email}"
+
+    @pytest.mark.parametrize("broker", ["fps", "npd", "anywho"])
+    def test_no_headings_stored_as_people(self, broker, fps, npd, anywho):
+        """FPS used to store 'Current & Past Contact Info' as an associate."""
+        profile = {"fps": fps, "npd": npd, "anywho": anywho}[broker]
+        people = list(getattr(profile, "relatives", []) or []) + \
+                 list(getattr(profile, "familyMembers", []) or []) + \
+                 list(getattr(profile, "associates", []) or [])
+        for person in people:
+            name = person["name"]
+            assert "&" not in name and len(name.split()) <= 5, \
+                f"{broker}: page furniture stored as a person: {name!r}"
+
+
+class TestFps:
+    def test_name_is_clean(self, fps):
+        # Was "James Oehringin Cameron" -- h1 text concatenated without a break
+        assert fps.fullName == "James Oehring"
+
+    def test_age(self, fps):
+        assert fps.age == 61
+
+    def test_street_address(self, fps):
+        assert fps.currentAddress["street"] == "413 Lovers Ln"
+        assert_street_address(fps.currentAddress["formatted"], "fps profile")
+
+    def test_geo_captured(self, fps):
+        assert fps.currentAddress["latitude"].startswith("39.")
+
+    def test_relatives_extracted(self, fps):
+        # Previously empty despite 46 in the page's JSON-LD
+        assert len(fps.relatives) == 10
+        assert fps.relatives[0]["name"] == "Rickilinda R Oehring"
+
+    def test_only_real_phone(self, fps):
+        assert [p["number"] for p in fps.phoneNumbers] == ["(816) 632-2218"]
+
+    def test_emails_are_personal(self, fps):
+        assert "ja_studly@hotmail.com" in fps.emailAddresses
+        assert not any("fastpeoplesearch" in e for e in fps.emailAddresses)
+
+    def test_previous_addresses_from_html(self, fps):
+        """
+        FPS publishes only the current homeLocation in JSON-LD, so past
+        addresses come from the rendered page -- and, as on the search page,
+        the street lives in the anchor's title while the link text shows only
+        city and state.
+        """
+        assert len(fps.previousAddresses) == 3
+        formatted = [a["formatted"] for a in fps.previousAddresses]
+        assert any("1225 Union AVE, Unit 502" in f for f in formatted)
+        for address in fps.previousAddresses:
+            assert_street_address(address["formatted"], "fps previous")
+            assert re.fullmatch(r'\d{5}(-\d{4})?', address["postalCode"])
+
+    def test_current_address_not_repeated(self, fps):
+        current = fps.currentAddress["street"].lower()
+        assert current not in [
+            (a.get("street") or "").lower() for a in fps.previousAddresses
+        ]
+
+
+class TestNpd:
+    def test_identity(self, npd):
+        assert npd.fullName == "James Oehring"
+        assert npd.dateOfBirth == "1963"
+        assert npd.age is not None
+
+    def test_street_address(self, npd):
+        # Was "Cameron, MO" -- city only
+        assert npd.currentAddress["street"] == "413 Lovers Ln"
+
+    def test_previous_addresses(self, npd):
+        assert len(npd.previousAddresses) >= 1
+
+    def test_phones(self, npd):
+        assert {p["number"] for p in npd.phoneNumbers} == {
+            "(816) 632-2218", "(816) 225-8592"
+        }
+
+    def test_emails(self, npd):
+        assert len(npd.emailAddresses) == 5
+        assert "ja_studly@hotmail.com" in npd.emailAddresses
+
+    def test_relatives(self, npd):
+        assert [r["name"] for r in npd.relatives] == ["Rickilinda Oehring"]
+
+
+class TestAnyWho:
+    def test_identity(self, anywho):
+        # Was age 65; the header says 37 and the summary agrees
+        assert anywho.fullName == "James A Oehring"
+        assert anywho.age == 37
+
+    def test_phones_with_carrier(self, anywho):
+        by_number = {p["number"]: p for p in anywho.phoneNumbers}
+        assert set(by_number) == {"(816) 225-8592", "(816) 632-2218"}
+        assert by_number["(816) 225-8592"]["carrier"] == "AT&T"
+
+    def test_carrier_has_no_ui_text(self, anywho):
+        for phone in anywho.phoneNumbers:
+            assert "More" not in phone["carrier"], phone
+
+    def test_emails_are_clean(self, anywho):
+        # Flattening the card glued neighbouring words onto each address
+        # ("jaoehring@gmail.com.show", "addressesjaoehring@gmail.comgmail")
+        assert "jaoehring@gmail.com" in anywho.emailAddresses
+        assert "james@ringldr.com" in anywho.emailAddresses
+        for email in anywho.emailAddresses:
+            assert not email.endswith(".show")
+            assert email.count("@") == 1
+
+    def test_current_address_from_header(self, anywho):
+        """
+        The header block labels the current address explicitly. Reading it from
+        the Address History card instead gave the wrong one, because that
+        card's DOM order does not track recency.
+        """
+        assert anywho.currentAddress["street"] == "1225 Union Ave, Apt 502"
+        assert anywho.currentAddress["city"] == "Kansas City"
+        # The header is the only place the postal code appears
+        assert anywho.currentAddress["postalCode"] == "64101"
+
+    def test_current_address_agrees_with_summary(self, anywho):
+        from anywho_html_scraper import AnyWhoHtmlScraper
+
+        summary = AnyWhoHtmlScraper(api_key="t")._extract_summary_from_html(
+            (FIXTURES / "anywho" / "james_oehring_mo.html").read_text()
+        )[0]
+        assert summary.address.startswith("1225 Union Ave")
+        assert anywho.currentAddress["formatted"].startswith("1225 Union Ave")
+
+    def test_address_history_is_complete(self, anywho):
+        """
+        The card heading states the count -- "Address History (11)". Extracting
+        fewer means rows are being dropped: requiring the locality child to
+        match exactly kept only the rows without a residency date range, 3 of
+        11, and nothing failed.
+        """
+        html = load("anywho", "james_oehring_mo")
+        claimed = int(re.search(r'Address History \((\d+)\)', html).group(1))
+        # currentAddress is lifted out of the history, so one fewer remains
+        assert len(anywho.previousAddresses) == claimed - 1, (
+            f"card claims {claimed} addresses, extracted "
+            f"{len(anywho.previousAddresses)} + 1 current"
+        )
+
+    def test_address_history(self, anywho):
+        assert len(anywho.previousAddresses) >= 3
+        for address in anywho.previousAddresses:
+            # The unit used to run into the city: "Apt 502Kansas, City"
+            assert not address["city"].startswith("City")
+            assert_street_address(address["formatted"], "anywho profile")
+
+    def test_residency_years_captured(self, anywho):
+        dated = [a for a in anywho.previousAddresses if a.get("years")]
+        assert dated, "no residency date ranges captured"
+        for address in dated:
+            assert re.fullmatch(r'\d{4}-\d{4}', address["years"]), address
+
+    def test_current_address_not_repeated_in_history(self, anywho):
+        formatted = anywho.currentAddress.get("formatted")
+        assert formatted not in [a["formatted"] for a in anywho.previousAddresses]
+
+    def test_family_members(self, anywho):
+        assert [f["name"] for f in anywho.familyMembers] == ["Rickilinda Oehring"]
+
+
+class TestSecondFixtures:
+    """Guard against overfitting to the oehring page."""
+
+    def test_fps_clark(self):
+        profile = FPSFullProfileScraper(api_key="t")._parse_profile_html(
+            load("fps", "lucas_clark_mo"), "pid"
+        )
+        assert profile.fullName == "Lucas Clark"
+        assert profile.currentAddress["street"]
+        for phone in profile.phoneNumbers:
+            assert FULL_PHONE.match(phone["number"])
+        # A longer history than oehring's, so this guards the parser against
+        # being tuned to a single page
+        assert len(profile.previousAddresses) > 5
+        for address in profile.previousAddresses:
+            assert_street_address(address["formatted"], "fps clark previous")
+
+    def test_anywho_rodgers(self):
+        profile = AnyWhoFullProfileScraper(api_key="t")._parse_profile_html(
+            load("anywho", "chris_rodgers_ks"), "pid"
+        )
+        assert profile.fullName == "Chris M Rodgers"
+        assert profile.age == 47
+        assert profile.emailAddresses
+        for email in profile.emailAddresses:
+            assert email.count("@") == 1

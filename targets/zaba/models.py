@@ -13,12 +13,20 @@ from typing import Dict, List, Any, Optional
 
 @dataclass
 class SummaryResult:
-    """Single result from summary search (for residential scraper)"""
+    """
+    Single result, shaped like the other targets' summary rows so Zaba can take
+    part in the Phase 1 sweep. Zaba fills these from the full profile it already
+    returns, rather than from a separate summary page.
+    """
     resultId: str
     fullName: str
     address: str
     age: Optional[int] = None
     profileUrl: str = ""
+    phone: str = ""      # Comma-separated
+    email: str = ""      # Comma-separated
+    aliases: str = ""    # Comma-separated
+    relatives: str = ""  # Comma-separated
 
 
 @dataclass
@@ -33,6 +41,9 @@ class Profile:
     relatives: List[Dict[str, str]] = field(default_factory=list)
     associates: List[Dict[str, str]] = field(default_factory=list)
     properties: List[Dict[str, Any]] = field(default_factory=list)
+    # Zaba-only extras, not published by the other three brokers
+    aliases: List[str] = field(default_factory=list)
+    pastAddresses: List[Dict[str, str]] = field(default_factory=list)
 
 
 @dataclass

@@ -14,12 +14,22 @@ from bs4 import BeautifulSoup
 from context.dev import ContextDev
 
 from targets.npd.models import Profile
+from jsonld_profile import (
+    age_from_birth_date,
+    extract_person,
+    format_phones,
+    related_names,
+    split_home_locations,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class NPDFullProfileScraper:
     """Scrapes full profiles from National Public Data using context.dev HTML method"""
+
+    MAX_RELATIVES = 10
+    MAX_EMAILS = 10
 
     def __init__(self, api_key: Optional[str] = None):
         """Initialize with context.dev client"""
@@ -62,59 +72,45 @@ class NPDFullProfileScraper:
             return None
 
     def _parse_profile_html(self, html: str, profile_id: str) -> Optional[Profile]:
-        """Parse full profile HTML and extract data"""
-        soup = BeautifulSoup(html, "html.parser")
+        """
+        Parse a full profile page from its schema.org Person block.
 
+        NPD publishes everything -- phones, emails, addresses, relatives -- in
+        JSON-LD; the rendered card shows only name, age and city/state. The
+        previous implementation regexed the page and produced numbers like
+        (611) 503-8382 that appear nowhere as phone numbers.
+        """
         try:
+            person = extract_person(html)
+            if not person:
+                logger.warning("No JSON-LD Person block on NPD profile page")
+                return None
+
             profile = Profile(profileId=profile_id)
+            profile.fullName = (person.get("name") or "").strip()
 
-            # Extract name - try multiple patterns
-            name_elem = soup.select_one("h3.card-title a span.larger, h1, .profile-name, [class*='name']")
-            if name_elem:
-                full_text = name_elem.get_text(strip=True)
-                # Clean up: extract just the name part (before location info)
-                import re as regex
-                # Match: FirstName LastName (stops at location separators)
-                name_match = regex.match(r'^([A-Za-z\s\-\.\']+?)(?:\s*[,(]|\s+in\s+)', full_text)
-                if name_match:
-                    profile.fullName = name_match.group(1).strip()
-                else:
-                    # Fallback: split on common separators
-                    for sep in ['(', ',']:
-                        if sep in full_text:
-                            full_text = full_text.split(sep)[0].strip()
-                    profile.fullName = full_text
+            birth = person.get("birthDate")
+            if birth:
+                profile.dateOfBirth = str(birth)
+                profile.age = age_from_birth_date(birth)
 
-            # Extract age
-            age_text = soup.get_text()
-            age_match = re.search(r"Age\s+(\d+)", age_text)
-            if age_match:
-                profile.age = int(age_match.group(1))
-
-            # Extract emails
-            emails = self._extract_emails(html)
-            profile.emailAddresses = list(emails)
-
-            # Extract phone numbers
-            phones = self._extract_phones(html)
-            for phone in phones:
-                profile.phoneNumbers.append({"number": phone, "type": "unknown"})
-
-            # Extract addresses
-            profile.currentAddress, profile.previousAddresses = self._extract_addresses(
-                soup
+            profile.phoneNumbers = format_phones(person.get("telephone"))
+            profile.relatives = related_names(person.get("relatedTo"), limit=self.MAX_RELATIVES)
+            profile.currentAddress, profile.previousAddresses = split_home_locations(
+                # NPD capitalises the key, unlike schema.org's homeLocation
+                person.get("HomeLocation") or person.get("homeLocation")
             )
 
-            # Extract relatives
-            profile.relatives = self._extract_relatives(soup)
-
-            # Extract associates
-            profile.associates = self._extract_associates(soup)
+            emails = person.get("email") or []
+            if isinstance(emails, str):
+                emails = [emails]
+            profile.emailAddresses = [e.strip() for e in emails if e and e.strip()][: self.MAX_EMAILS]
 
             logger.debug(
                 f"Parsed NPD profile: {profile.fullName}, "
                 f"{len(profile.emailAddresses)} emails, "
-                f"{len(profile.phoneNumbers)} phones"
+                f"{len(profile.phoneNumbers)} phones, "
+                f"{len(profile.relatives)} relatives"
             )
 
             return profile if profile.fullName else None
@@ -122,129 +118,3 @@ class NPDFullProfileScraper:
         except Exception as e:
             logger.error(f"Error parsing NPD profile HTML: {e}", exc_info=True)
             return None
-
-    def _extract_emails(self, html: str) -> set:
-        """Extract email addresses from HTML"""
-        email_pattern = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
-        emails = set(re.findall(email_pattern, html.lower()))
-
-        # Filter out system/service emails
-        system_domains = {
-            'nationalpublicdata.com',
-            'support@',
-            'noreply@',
-            'no-reply@',
-            'admin@',
-            'info@',
-            'notifications@',
-        }
-
-        filtered = set()
-        for email in emails:
-            # Skip if it's a system email
-            if any(domain in email for domain in system_domains):
-                continue
-            filtered.add(email)
-
-        return filtered
-
-    def _extract_phones(self, html: str) -> List[str]:
-        """Extract phone numbers from HTML"""
-        phone_pattern = r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}"
-        matches = re.findall(phone_pattern, html)
-
-        phones = []
-        seen = set()
-
-        for match in matches:
-            digits = re.sub(r"\D", "", match)
-            if len(digits) == 10 and digits not in seen:
-                formatted = f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
-                phones.append(formatted)
-                seen.add(digits)
-
-        return phones[:3]
-
-    def _extract_addresses(
-        self, soup: BeautifulSoup
-    ) -> tuple[Dict[str, str], List[Dict[str, str]]]:
-        """Extract current and previous addresses"""
-        current_address = {}
-        previous_addresses = []
-
-        # Try multiple selectors to handle page structure variations
-        address_links = soup.select('a[href*="/address/"], [class*="address"] a')
-
-        if not address_links:
-            # Fallback: look for any divs with address-like content
-            address_sections = soup.select('[class*="address"], [class*="location"]')
-        else:
-            address_sections = address_links
-
-        for i, section in enumerate(address_sections[:5]):  # Limit to 5 addresses
-            if isinstance(section, str):
-                addr_text = section
-            else:
-                addr_text = section.get_text(strip=True)
-
-            if not addr_text or len(addr_text) < 5:
-                continue
-
-            addr_dict = {"formatted": addr_text}
-
-            if i == 0:
-                current_address = addr_dict
-            else:
-                previous_addresses.append(addr_dict)
-
-        return current_address, previous_addresses
-
-    def _extract_relatives(self, soup: BeautifulSoup) -> List[Dict[str, str]]:
-        """Extract relatives from profile"""
-        relatives = []
-
-        rel_header = soup.find(string=re.compile(r"Relatives?|Family", re.I))
-        if rel_header:
-            container = rel_header.find_parent("div")
-            if container:
-                for li in container.select("li, [class*='relative']"):
-                    name = li.get_text(strip=True)
-                    if name and len(name) > 2:
-                        relatives.append({"name": name, "relationship": "family"})
-
-        return relatives[:5]
-
-    def _extract_associates(self, soup: BeautifulSoup) -> List[Dict[str, str]]:
-        """Extract associates from profile"""
-        associates = []
-
-        assoc_header = soup.find(string=re.compile(r"Associates?|Known Connections", re.I))
-        if assoc_header:
-            container = assoc_header.find_parent("div")
-            if container:
-                for li in container.select("li, [class*='associate']"):
-                    name = li.get_text(strip=True)
-                    if name and len(name) > 2:
-                        associates.append({"name": name})
-
-        return associates[:5]
-
-
-def main():
-    """Test NPD full profile scraper"""
-    import os
-
-    api_key = os.getenv("CONTEXT_DEV_API_KEY")
-    if not api_key:
-        print("❌ CONTEXT_DEV_API_KEY not set")
-        return
-
-    scraper = NPDFullProfileScraper(api_key=api_key)
-
-    # Would need a real NPD profile URL to test
-    print("✅ NPD Full Profile Scraper ready (requires NPD profile URL)")
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    main()
