@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """
-Run the Phase 1 summary scrapers (FPS, NPD, AnyWho) against the test profiles
-and write a results CSV for manual accuracy review.
+Run the Phase 1 summary scrapers (FPS, NPD, AnyWho, Zaba) against the test
+profiles and write a results CSV for manual accuracy review.
 
 Output columns follow the established results layout: a SUMMARY row per person
 carrying timing and counts, then one DETAIL row per result per broker.
+
+Rows are written and flushed as each profile completes, so interrupting a run
+keeps everything already fetched. Per-broker timings print inline, which is how
+a slow broker becomes visible while the sweep is running.
 
 Usage:
     python3 run_summary_test.py                 # first 5 profiles
     python3 run_summary_test.py --limit 17      # all of them
     python3 run_summary_test.py --only oehring,clark
+    python3 run_summary_test.py --timeout 10    # tighter per-scraper bound
     python3 run_summary_test.py --out /tmp/results.csv
+
+Long sweeps are worth backgrounding so progress stays visible and the run can
+be stopped without losing work.
 """
 
 import argparse
 import asyncio
 import csv
+import sys
 import time
 from pathlib import Path
 
@@ -28,6 +37,11 @@ DEFAULT_OUTPUT = REPO_ROOT / "context" / "summary_results_test_profiles.csv"
 
 # Phase 1 summary brokers
 BROKERS = ("fps", "npd", "anywho", "zaba")
+
+# Per-scraper timeout. A profile takes as long as its slowest broker, so this
+# is also the per-profile worst case. SequenceRunner defaults to 60s, which let
+# a 17-profile sweep run 9 minutes; observed healthy calls finish in 0.4-4s.
+DEFAULT_TIMEOUT = 20
 
 FIELDNAMES = [
     "search_ID", "profile_number", "target", "first_name", "last_name",
@@ -64,13 +78,22 @@ def age_of(summary):
     return str(summary.age) if summary.age else (summary.age_range or "")
 
 
-async def run(profiles, runner):
-    rows = []
+async def run(profiles, runner, writer, flush):
+    """
+    Run each profile, writing its rows before starting the next one.
+
+    Rows are flushed per profile rather than collected and written at the end:
+    a sweep is minutes of paid API calls, and an interrupted run that discards
+    everything it already fetched is the worst possible failure. Killing this
+    mid-run leaves a valid CSV of the profiles that finished.
+    """
+    written = 0
 
     for i, profile in enumerate(profiles, 1):
         label = profile["search_ID"]
-        print(f"{i:2}. {label:<12}", end=" ", flush=True)
+        print(f"{i:2}/{len(profiles)} {label:<12}", end=" ", flush=True)
         started = time.time()
+        rows = []
 
         try:
             output = await runner.quickscan(
@@ -83,14 +106,16 @@ async def run(profiles, runner):
             )
         except Exception as e:
             elapsed = time.time() - started
-            print(f"✗ {type(e).__name__}: {str(e)[:60]}")
-            rows.append(blank_row(
+            print(f"✗ {elapsed:5.1f}s  {type(e).__name__}: {str(e)[:50]}")
+            writer.writerow(blank_row(
                 profile,
                 profile_number="ERROR",
                 target="ALL",
                 response_time_s=f"{elapsed:.2f}",
                 notes=str(e)[:200],
             ))
+            flush()
+            written += 1
             continue
 
         elapsed = time.time() - started
@@ -144,9 +169,17 @@ async def run(profiles, runner):
                     relatives=summary.relatives,
                 ))
 
-        print(f"✓ ({elapsed:.1f}s, {total} results)")
+        writer.writerows(rows)
+        flush()
+        written += len(rows)
 
-    return rows
+        # Per-broker timings inline, so a slow broker is visible while the
+        # sweep runs rather than only in the CSV afterwards.
+        slowest = sorted(scraped.items(), key=lambda kv: -kv[1].timing_ms)
+        detail = " ".join(f"{b.lower()[:3]}:{r.timing_ms/1000:.1f}" for b, r in slowest)
+        print(f"✓ {elapsed:5.1f}s  {total:>2} results   {detail}")
+
+    return written
 
 
 def main():
@@ -155,6 +188,12 @@ def main():
     parser.add_argument("--only", help="comma-separated search_IDs to run instead")
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--timeout", type=int, default=DEFAULT_TIMEOUT,
+        help=f"per-scraper timeout in seconds (default {DEFAULT_TIMEOUT}). "
+             "A profile takes as long as its slowest broker, so this bounds "
+             "the per-profile worst case",
+    )
     args = parser.parse_args()
 
     profiles = load_profiles(args.input)
@@ -164,18 +203,31 @@ def main():
     else:
         profiles = profiles[: args.limit]
 
-    print(f"Testing {len(profiles)} profile(s) across {', '.join(BROKERS).upper()}\n")
-
-    rows = asyncio.run(run(profiles, SequenceRunner()))
+    print(f"Testing {len(profiles)} profile(s) across {', '.join(BROKERS).upper()}")
+    print(f"Timeout {args.timeout}s per scraper -> worst case ~{args.timeout}s per profile")
+    print(f"Writing to {args.out} as each profile completes\n")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    started = time.time()
+
+    # Opened before the run and flushed per profile, so an interrupted sweep
+    # keeps what it already fetched.
     with open(args.out, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
         writer.writeheader()
-        writer.writerows(rows)
+        f.flush()
 
-    print(f"\n✅ {len(rows)} rows -> {args.out}")
+        try:
+            written = asyncio.run(
+                run(profiles, SequenceRunner(timeout=args.timeout), writer, f.flush)
+            )
+        except KeyboardInterrupt:
+            print(f"\n⚠️  interrupted — rows already written are intact in {args.out}")
+            return 130
+
+    print(f"\n✅ {written} rows in {time.time() - started:.0f}s -> {args.out}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
