@@ -26,9 +26,8 @@ REPO_ROOT = Path(__file__).parent
 DEFAULT_INPUT = REPO_ROOT / "context" / "summary- test_profiles.csv"
 DEFAULT_OUTPUT = REPO_ROOT / "context" / "summary_results_test_profiles.csv"
 
-# Phase 1 summary brokers. Zaba needs the residential service on serv01 and is
-# not part of the summary sweep.
-BROKERS = ("fps", "npd", "anywho")
+# Phase 1 summary brokers
+BROKERS = ("fps", "npd", "anywho", "zaba")
 
 FIELDNAMES = [
     "search_ID", "profile_number", "target", "first_name", "last_name",

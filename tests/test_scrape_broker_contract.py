@@ -6,6 +6,7 @@ Each broker module defines its own SummaryResult with different field names:
     fps     address          phone         age (int)
     npd     addressPreview   phonePreview  ageRange
     anywho  address          phone         ageRange
+    zaba    address          phone         age (int)
 
 _scrape_broker flattens all three into the shared data_models.SummaryResult
 using a chain of getattr fallbacks. That chain has no type checking behind it:
@@ -30,6 +31,7 @@ from sequence_runner import SequenceRunner  # noqa: E402
 import targets.anywho.models as anywho_models  # noqa: E402
 import targets.fps.models as fps_models  # noqa: E402
 import targets.npd.models as npd_models  # noqa: E402
+import targets.zaba.models as zaba_models  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -91,6 +93,17 @@ BROKERS = {
         aliases="James A Oehring",
         relatives="Rickilinda Oehring",
     ),
+    BrokerName.ZABA: zaba_models.SummaryResult(
+        resultId="zaba_0",
+        fullName="James Oehring",
+        address="413 Lovers LN, Cameron, Missouri 64429",
+        age=37,
+        profileUrl="https://www.zabasearch.com/people/james-oehring/missouri/cameron",
+        phone="(816) 632-2218",
+        email="rickioehring@yahoo.com",
+        aliases="james O oehring",
+        relatives="Rickilinda R Oehring",
+    ),
     BrokerName.ANYWHO: anywho_models.SummaryResult(
         resultId="anywho_0",
         fullName="James A Oehring",
@@ -115,7 +128,9 @@ class TestFieldsSurviveTheCrossing:
     def test_address(self, runner, broker, user_input):
         got = scrape(runner, broker, BROKERS[broker], user_input)
         assert got.address, f"{broker}: address lost (addressPreview vs address mismatch?)"
-        assert "Lovers Ln" in got.address or "Union Ave" in got.address
+        assert any(
+            street in got.address for street in ("Lovers Ln", "Lovers LN", "Union Ave")
+        ), f"{broker}: unexpected address {got.address!r}" 
 
     def test_phone(self, runner, broker, user_input):
         got = scrape(runner, broker, BROKERS[broker], user_input)
@@ -129,6 +144,11 @@ class TestFieldsSurviveTheCrossing:
 
     def test_relatives(self, runner, broker, user_input):
         assert scrape(runner, broker, BROKERS[broker], user_input).relatives
+
+    def test_result_id_carried(self, runner, broker, user_input):
+        # Zaba matches a summary back to the full profile it returned in the
+        # same Phase 1 call, so the broker's own id has to survive the crossing
+        assert scrape(runner, broker, BROKERS[broker], user_input).result_id
 
     def test_profile_url(self, runner, broker, user_input):
         assert scrape(runner, broker, BROKERS[broker], user_input).profile_url

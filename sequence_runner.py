@@ -8,7 +8,7 @@ PHASE 1: Parallel summary scraping & deduplication
   - Return ranked list of potential matches for user selection
 
 PHASE 2: Full profiles & enrichment (after user selects)
-  - Scrape full profiles from all 4 brokers in parallel
+  - Scrape full profiles from FPS/NPD/AnyWho (Zaba's arrives in Phase 1)
   - Extract emails and consolidate across brokers
   - Enrich with Holehe (online services) and Leakcheck (data breaches)
   - Consolidate into unified profile with deduplication
@@ -40,14 +40,12 @@ from fps_html_scraper import FPSHtmlScraper
 from npd_html_scraper import NPDHtmlScraper
 from anywho_html_scraper import AnyWhoHtmlScraper
 
-# Zaba: residential IP service on serv01 (not HTML, IP gets blocked)
-from zaba_residential_scraper import ZabaResidentialScraper
+from zaba_html_scraper import ZabaHtmlScraper
 
 # Phase 2: Full Profiles & Enrichment
 from fps_full_profile_scraper import FPSFullProfileScraper
 from npd_full_profile_scraper import NPDFullProfileScraper
 from anywho_full_profile_scraper import AnyWhoFullProfileScraper
-from zaba_full_profile_scraper import ZabaFullProfileScraper
 from email_extractor import EmailExtractor
 from holehe_enricher import HoleheEnricher
 from leakcheck_enricher import LeakcheckEnricher
@@ -59,20 +57,21 @@ logger = logging.getLogger(__name__)
 class SequenceRunner:
     """Main orchestrator for quickscan sequence using HTML scrapers"""
 
-    def __init__(self, api_key: Optional[str] = None, timeout: int = 60, use_zaba_residential: bool = True):
+    def __init__(self, api_key: Optional[str] = None, timeout: int = 60):
         """
         Initialize sequence runner with HTML-based scrapers.
 
         Args:
             api_key: context.dev API key (uses env var if not provided)
             timeout: Timeout for each scraper (seconds)
-            use_zaba_residential: Use serv01:8788 residential service for Zaba (true)
-                                  or HTML method (false, will fail with IP blocking)
         """
         self.api_key = api_key or os.environ.get('CONTEXT_DEV_API_KEY')
         self.timeout = timeout
-        self.use_zaba_residential = use_zaba_residential
         self.dedup_engine = DedupEngine()
+
+        # Zaba publishes full profiles on its search page, so Phase 1 already
+        # holds everything Phase 2 would fetch. Keyed by broker then result id.
+        self._profiles_from_summary: Dict[str, Dict[str, Any]] = {}
 
         # Phase 2 components
         self.email_extractor = EmailExtractor()
@@ -85,7 +84,8 @@ class SequenceRunner:
             BrokerName.FPS: FPSFullProfileScraper(api_key=self.api_key),
             BrokerName.NPD: NPDFullProfileScraper(api_key=self.api_key),
             BrokerName.ANYWHO: AnyWhoFullProfileScraper(api_key=self.api_key),
-            BrokerName.ZABA: ZabaFullProfileScraper(),
+            # No Zaba entry: its full profile arrives with the Phase 1 search
+            # result, so there is nothing to fetch separately.
         }
 
         # Initialize scrapers
@@ -93,13 +93,12 @@ class SequenceRunner:
             BrokerName.FPS: FPSHtmlScraper(api_key=self.api_key, timeout=timeout),
             BrokerName.NPD: NPDHtmlScraper(api_key=self.api_key, timeout=timeout),
             BrokerName.ANYWHO: AnyWhoHtmlScraper(api_key=self.api_key, timeout=timeout),
-            # Zaba: use residential IP service (serv01:8788) - HTML method gets IP-blocked
-            BrokerName.ZABA: ZabaResidentialScraper(timeout=timeout, use_prod=use_zaba_residential),
+            BrokerName.ZABA: ZabaHtmlScraper(api_key=self.api_key, timeout=timeout),
         }
 
         logger.info(
             f"SequenceRunner initialized: "
-            f"Phase 1 (Summary: FPS/NPD/AnyWho HTML + Zaba residential), "
+            f"Phase 1 (Summary: FPS/NPD/AnyWho/Zaba HTML), "
             f"Phase 2 (Full profiles + Enrichment ready)"
         )
 
@@ -115,10 +114,12 @@ class SequenceRunner:
         """
         start_time = time.time()
 
+        # A runner is reused across searches; clear the carry-over from the last
         logger.info(
             f"QuickScan started: {user_input.first_name} {user_input.last_name}, "
             f"{user_input.city}, {user_input.state}"
         )
+        self._profiles_from_summary = {}
 
         # PHASE 1: Parallel Summary Scraping
         scrape_results = await self._scrape_summaries_parallel(user_input)
@@ -247,6 +248,14 @@ class SequenceRunner:
 
             timing_ms = int((time.time() - start_time) * 1000)
 
+            # Zaba returns full profiles from the search page rather than a
+            # summary; keep them so Phase 2 does not refetch what we already
+            # have (and Zaba has no per-person profile URL to refetch with).
+            if getattr(output, 'profiles', None):
+                self._profiles_from_summary[broker.value] = {
+                    profile.profileId: profile for profile in output.profiles
+                }
+
             # Convert ScrapeOutput to ScrapeResult
             summary_results = []
             if output.summary_results:
@@ -269,6 +278,7 @@ class SequenceRunner:
 
                     sr = SR(
                         broker=broker,
+                        result_id=getattr(summary, 'resultId', ''),
                         full_name=summary.fullName,
                         address=getattr(summary, 'address', getattr(summary, 'addressPreview', '')),
                         age_range=age_range_str,
@@ -333,21 +343,31 @@ class SequenceRunner:
             if member.summary.profile_url
         }
 
+        # Zaba has no per-person profile URL: its search page already returned
+        # the full profile, so take it from Phase 1 instead of refetching.
+        for member in dedup_group.members:
+            if member.summary.broker != BrokerName.ZABA:
+                continue
+            cached = self._profiles_from_summary.get(
+                BrokerName.ZABA.value, {}
+            ).get(member.summary.result_id)
+            if cached:
+                full_profiles[BrokerName.ZABA.value] = cached
+                logger.debug("Reused Zaba full profile from Phase 1")
+
         for broker_name, scraper in self.full_profile_scrapers.items():
+            if broker_name == BrokerName.ZABA:
+                continue  # handled above, from the Phase 1 result
+
             profile_url = profile_links.get(broker_name.value)
             if not profile_url:
                 logger.debug(f"No profile URL for {broker_name.value}")
                 continue
 
             try:
-                if broker_name == BrokerName.ZABA:
-                    # Zaba doesn't have profile URLs, it returns full data directly
-                    # For now, skip full profile scraping for Zaba
-                    continue
-                else:
-                    profile = scraper.scrape_profile(profile_url)
-                    if profile:
-                        full_profiles[broker_name.value] = profile
+                profile = scraper.scrape_profile(profile_url)
+                if profile:
+                    full_profiles[broker_name.value] = profile
 
             except Exception as e:
                 logger.error(f"Error scraping {broker_name} profile: {e}")

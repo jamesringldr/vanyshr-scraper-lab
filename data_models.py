@@ -21,6 +21,9 @@ class SummaryResult:
     """Single summary result from a broker"""
     broker: BrokerName
     full_name: str
+    # The broker's own id for this result. Zaba uses it to match a Phase 1
+    # summary back to the full profile it returned at the same time.
+    result_id: str = ""
     address: str = ""
     age_range: str = ""  # e.g., "37", "Age 37", empty if not available
     age: Optional[int] = None  # Parsed integer
@@ -35,6 +38,7 @@ class SummaryResult:
         """Convert to dictionary for JSON"""
         return {
             'broker': self.broker.value,
+            'result_id': self.result_id,
             'full_name': self.full_name,
             'address': self.address,
             'age_range': self.age_range,
