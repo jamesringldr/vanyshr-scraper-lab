@@ -12,6 +12,16 @@ PHASE 2: Full profiles & enrichment (after user selects)
   - Extract emails and consolidate across brokers
   - Enrich with Holehe (online services) and Leakcheck (data breaches)
   - Consolidate into unified profile with deduplication
+
+PHASE 1, FPS-led variant: scan() + select_profile()
+  - FPS is both the fastest broker and the highest-hit-rate one (see the
+    34-subject sweep), so it leads: scan() awaits FPS alone and returns its
+    candidates for the user to pick from, while NPD/AnyWho/Zaba start scraping
+    in the background at the same moment. select_profile() awaits those
+    background results once the user has chosen, matches each broker's best
+    candidate against the chosen one, and returns a DedupGroup ready for
+    full_profile_phase() -- skipping the N-way dedup across all 4 brokers that
+    quickscan() does up front.
 """
 
 import asyncio
@@ -20,7 +30,7 @@ import sys
 import time
 import os
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -31,7 +41,8 @@ load_dotenv('.env.local')
 sys.path.insert(0, str(Path(__file__).parent))
 
 from data_models import (
-    QuickScanInput, ScrapeResult, BrokerName, SequenceOutput
+    QuickScanInput, ScrapeResult, BrokerName, SequenceOutput,
+    SummaryResult, DedupGroup,
 )
 from dedup_engine import DedupEngine
 
@@ -151,6 +162,86 @@ class SequenceRunner:
         )
 
         return output
+
+    async def scan(
+        self, user_input: QuickScanInput
+    ) -> Tuple[ScrapeResult, Dict[BrokerName, "asyncio.Task"]]:
+        """
+        FPS-led Phase 1: await FPS alone, start the other three in the
+        background at the same moment.
+
+        FPS is both the fastest broker and the one most likely to have the
+        person (91% correct-match hit rate across a 34-subject sweep, vs.
+        21-74% for NPD/AnyWho/Zaba -- and it's the fastest of the four too),
+        so it's the right one to block on for the profile-selection step.
+        NPD/AnyWho/Zaba average under a second each, so by the time a user has
+        picked a candidate from FPS's list, select_profile() below has
+        real results to match against instead of having to wait on them.
+
+        Returns FPS's own ScrapeResult (its candidates, undeduplicated --
+        multiple FPS candidates are fine here, the same as within any other
+        broker's results) plus the three still-running background tasks to
+        pass into select_profile() once the user has chosen.
+        """
+        self._profiles_from_summary = {}
+
+        background = {
+            broker: asyncio.create_task(
+                self._scrape_broker(broker, self.scrapers[broker], user_input)
+            )
+            for broker in (BrokerName.NPD, BrokerName.ANYWHO, BrokerName.ZABA)
+        }
+
+        fps_result = await self._scrape_broker(
+            BrokerName.FPS, self.scrapers[BrokerName.FPS], user_input
+        )
+
+        return fps_result, background
+
+    async def select_profile(
+        self,
+        selected: SummaryResult,
+        background: Dict[BrokerName, "asyncio.Task"],
+    ) -> DedupGroup:
+        """
+        Phase 1b: match the user's chosen FPS candidate against the
+        NPD/AnyWho/Zaba results started in scan(), and return a DedupGroup
+        ready for full_profile_phase().
+
+        Each broker contributes at most its single best-scoring candidate,
+        and only if that score clears DedupEngine.MERGE_THRESHOLD -- a broker
+        that didn't find this specific person (e.g. AnyWho's Kansas City
+        "James A Oehring" decoy when the FPS pick is the Cameron address) is
+        left out of the group rather than folded in on a weak score.
+        """
+        results = await asyncio.gather(*background.values(), return_exceptions=True)
+
+        group = DedupGroup(dedup_id=self.dedup_engine._generate_dedup_id(selected))
+        group.add_member(selected, 100.0)
+
+        for broker, result in zip(background.keys(), results):
+            if isinstance(result, Exception):
+                logger.error(f"{broker.value} background scrape failed: {result}")
+                continue
+            if result.status != "success" or not result.summaries:
+                continue
+
+            best_summary, best_score = None, 0.0
+            for candidate in result.summaries:
+                score = self.dedup_engine.calculate_match_score(selected, candidate)
+                if score > best_score:
+                    best_summary, best_score = candidate, score
+
+            if best_summary is not None and best_score >= self.dedup_engine.MERGE_THRESHOLD:
+                group.add_member(best_summary, best_score)
+            else:
+                logger.info(
+                    f"{broker.value}: no candidate matched the selected "
+                    f"profile (best score {best_score:.0f})"
+                )
+
+        self.dedup_engine._check_age_conflict(group)
+        return group
 
     async def _scrape_summaries_parallel(
         self,
