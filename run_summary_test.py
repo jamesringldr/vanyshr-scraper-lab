@@ -21,6 +21,7 @@ Usage:
     python3 run_summary_test.py --only chris.ocker,lucas.clark
     python3 run_summary_test.py --timeout 10      # tighter per-scraper bound
     python3 run_summary_test.py --out /tmp/results.csv
+    python3 run_summary_test.py --group full --skip-db   # CSV only, no scrape_runs row
 
 Long sweeps are worth backgrounding so progress stays visible and the run can
 be stopped without losing work.
@@ -53,8 +54,8 @@ DEFAULT_TIMEOUT = 20
 FIELDNAMES = [
     "subject_id", "profile_number", "target", "first_name", "last_name",
     "city", "state_id", "age", "response_time_s", "brokers_searched",
-    "total_results", "notes", "address", "phones", "emails", "aliases",
-    "relatives",
+    "total_results", "notes", "address", "profile_url", "phones", "emails",
+    "aliases", "relatives",
 ]
 
 
@@ -197,6 +198,7 @@ async def run(profiles, runner, run_pk, writer, flush):
                     response_time_s=timing,
                     notes=f"Profile {n} from {broker}",
                     address=summary.address,
+                    profile_url=summary.profile_url,
                     phones=summary.phone,
                     emails=summary.email,
                     aliases=summary.aliases,
@@ -223,7 +225,8 @@ async def run(profiles, runner, run_pk, writer, flush):
         flush()
         written += len(rows)
 
-        db.insert_summary_results(run_pk, profile["id"], db_rows)
+        if run_pk is not None:
+            db.insert_summary_results(run_pk, profile["id"], db_rows)
 
         # Per-broker timings inline, so a slow broker is visible while the
         # sweep runs rather than only in the CSV afterwards.
@@ -244,6 +247,12 @@ def main():
     parser.add_argument("--only", help="comma-separated subject ids to run instead, e.g. chris.ocker,lucas.clark")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
+        "--skip-db", action="store_true",
+        help="CSV only -- don't create a scrape_runs row or write to summary_results. "
+             "Subjects are still read from the DB. For manual-review runs whose "
+             "output will be used to enrich test_subjects rather than logged as a run.",
+    )
+    parser.add_argument(
         "--timeout", type=int, default=DEFAULT_TIMEOUT,
         help=f"per-scraper timeout in seconds (default {DEFAULT_TIMEOUT}). "
              "A profile takes as long as its slowest broker, so this bounds "
@@ -263,13 +272,14 @@ def main():
     if not profiles:
         sys.exit(f"No test_subjects found for group={args.group!r} (or --only matched nothing)")
 
+    dest = args.out if args.skip_db else f"{args.out} and testing.summary_results"
     print(f"Testing {len(profiles)} profile(s) [group={args.group}] across {', '.join(BROKERS).upper()}")
     print(f"Timeout {args.timeout}s per scraper -> worst case ~{args.timeout}s per profile")
-    print(f"Writing to {args.out} as each profile completes\n")
+    print(f"Writing to {dest} as each profile completes\n")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     started = time.time()
-    run_pk = db.start_run(git_ref=git_ref(), notes=f"group={args.group} limit={args.limit}")
+    run_pk = None if args.skip_db else db.start_run(git_ref=git_ref(), notes=f"group={args.group} limit={args.limit}")
 
     # Opened before the run and flushed per profile, so an interrupted sweep
     # keeps what it already fetched.
@@ -283,12 +293,14 @@ def main():
                 run(profiles, SequenceRunner(timeout=args.timeout), run_pk, writer, f.flush)
             )
         except KeyboardInterrupt:
-            print(f"\n⚠️  interrupted — rows already written are intact in {args.out} and testing.summary_results")
-            db.finish_run(run_pk)
+            print(f"\n⚠️  interrupted — rows already written are intact in {dest}")
+            if run_pk is not None:
+                db.finish_run(run_pk)
             return 130
 
-    db.finish_run(run_pk)
-    print(f"\n✅ {written} rows in {time.time() - started:.0f}s -> {args.out} and testing.summary_results")
+    if run_pk is not None:
+        db.finish_run(run_pk)
+    print(f"\n✅ {written} rows in {time.time() - started:.0f}s -> {dest}")
     return 0
 
 
