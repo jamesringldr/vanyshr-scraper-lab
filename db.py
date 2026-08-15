@@ -56,12 +56,12 @@ def fetch_subjects(group: str) -> List[Dict[str, Any]]:
         return [dict(row) for row in cur.fetchall()]
 
 
-def start_run(git_ref: str, notes: str = "") -> int:
+def start_run(git_ref: str, notes: str = "", kind: str = "summary") -> int:
     """Insert a scrape_runs row, return its id (the FK value other tables use)."""
     # Seconds, not just minutes -- back-to-back batches (run_summary_test.py
     # --offset in sequence) can easily start within the same minute and
     # collide on run_id's unique constraint otherwise.
-    run_id = f"summary.{datetime.now().strftime('%m.%d.%H.%M.%S')}"
+    run_id = f"{kind}.{datetime.now().strftime('%m.%d.%H.%M.%S')}"
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO testing.scrape_runs (run_id, git_ref, notes) "
@@ -117,5 +117,95 @@ def insert_summary_results(run_pk: int, subject_id: str, rows: List[Dict[str, An
             "(run_id, subject_id, target, full_name, address, age, "
             "profile_url, phone, email, aliases, relatives, previous_addresses, "
             "response_time_ms, status, notes, raw) VALUES %s",
+            values,
+        )
+
+
+def fetch_subject(subject_id: str) -> Optional[Dict[str, Any]]:
+    """A single test_subjects row's search params (for re-scraping Zaba,
+    which has no per-person URL to fetch by -- it's searched by name/city
+    like Phase 1, not followed like FPS/NPD/AnyWho)."""
+    with _connect() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT id, first_name, last_name, city, state_id "
+            "FROM testing.test_subjects WHERE id = %s",
+            (subject_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def fetch_confirmed_matches(subject_ids: List[str]) -> List[Dict[str, Any]]:
+    """
+    summary_results rows marked is_target_match = true for the given
+    subjects -- the vetted (subject, target, profile_url) list Phase 2 scrapes
+    from, rather than re-guessing which candidate is the right person.
+    """
+    if not subject_ids:
+        return []
+    with _connect() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT id AS summary_result_id, subject_id, target, profile_url, "
+            "full_name, address, phone, email, relatives "
+            "FROM testing.summary_results "
+            "WHERE subject_id = ANY(%s) AND is_target_match = true "
+            "ORDER BY subject_id, target",
+            (subject_ids,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
+def insert_full_profile_results(run_pk: int, subject_id: str, rows: List[Dict[str, Any]]) -> None:
+    """
+    Each row: target, status, summary_result_id, and optionally
+    response_time_ms, full_name, age, date_of_birth, current_address,
+    previous_addresses, phone, email, relatives, aliases, associates,
+    resided_since, property_beds, property_baths, property_sqft,
+    property_year_built, property_estimated_value, property_county,
+    notes, raw (a JSON-able dict).
+    """
+    if not rows:
+        return
+
+    values = [
+        (
+            run_pk,
+            subject_id,
+            r.get("summary_result_id"),
+            r["target"],
+            r.get("response_time_ms"),
+            r["status"],
+            r.get("full_name"),
+            r.get("age"),
+            r.get("date_of_birth"),
+            r.get("current_address"),
+            r.get("previous_addresses"),
+            r.get("phone"),
+            r.get("email"),
+            r.get("relatives"),
+            r.get("aliases"),
+            r.get("associates"),
+            r.get("resided_since"),
+            r.get("property_beds"),
+            r.get("property_baths"),
+            r.get("property_sqft"),
+            r.get("property_year_built"),
+            r.get("property_estimated_value"),
+            r.get("property_county"),
+            r.get("notes"),
+            psycopg2.extras.Json(r["raw"]) if r.get("raw") is not None else None,
+        )
+        for r in rows
+    ]
+
+    with _connect() as conn, conn.cursor() as cur:
+        psycopg2.extras.execute_values(
+            cur,
+            "INSERT INTO testing.full_profile_results "
+            "(run_id, subject_id, summary_result_id, target, response_time_ms, status, "
+            "full_name, age, date_of_birth, current_address, previous_addresses, "
+            "phone, email, relatives, aliases, associates, resided_since, "
+            "property_beds, property_baths, property_sqft, property_year_built, "
+            "property_estimated_value, property_county, notes, raw) VALUES %s",
             values,
         )
