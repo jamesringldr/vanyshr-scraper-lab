@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """
-Run the Phase 1 summary scrapers (FPS, NPD, AnyWho, Zaba) against the test
-profiles and write a results CSV for manual accuracy review.
+Run the Phase 1 summary scrapers (FPS, NPD, AnyWho, Zaba) against test
+subjects pulled from testing.test_subjects and log results to
+testing.scrape_runs / testing.summary_results, plus a CSV for quick eyeballing.
 
-Output columns follow the established results layout: a SUMMARY row per person
-carrying timing and counts, then one DETAIL row per result per broker.
+Subjects come from the DB (--group selects full/core/quick/me, matching
+test_subjects.test_group) rather than a static CSV -- testing.test_subjects is
+the source of truth now, seeded and maintained directly in Supabase.
 
 Rows are written and flushed as each profile completes, so interrupting a run
-keeps everything already fetched. Per-broker timings print inline, which is how
-a slow broker becomes visible while the sweep is running.
+keeps everything already fetched -- both the CSV and what's already committed
+to the DB. Per-broker timings print inline, which is how a slow broker
+becomes visible while the sweep is running.
 
 Usage:
-    python3 run_summary_test.py                 # first 5 profiles
-    python3 run_summary_test.py --limit 17      # all of them
-    python3 run_summary_test.py --only oehring,clark
-    python3 run_summary_test.py --timeout 10    # tighter per-scraper bound
+    python3 run_summary_test.py                  # --group quick (5 profiles)
+    python3 run_summary_test.py --group core      # 15 profiles
+    python3 run_summary_test.py --group full      # everyone
+    python3 run_summary_test.py --group me
+    python3 run_summary_test.py --only chris.ocker,lucas.clark
+    python3 run_summary_test.py --timeout 10      # tighter per-scraper bound
     python3 run_summary_test.py --out /tmp/results.csv
 
 Long sweeps are worth backgrounding so progress stays visible and the run can
@@ -24,15 +29,16 @@ be stopped without losing work.
 import argparse
 import asyncio
 import csv
+import subprocess
 import sys
 import time
 from pathlib import Path
 
+import db
 from sequence_runner import SequenceRunner
 from data_models import QuickScanInput
 
 REPO_ROOT = Path(__file__).parent
-DEFAULT_INPUT = REPO_ROOT / "context" / "summary- test_profiles.csv"
 DEFAULT_OUTPUT = REPO_ROOT / "context" / "summary_results_test_profiles.csv"
 
 # Phase 1 summary brokers
@@ -44,26 +50,31 @@ BROKERS = ("fps", "npd", "anywho", "zaba")
 DEFAULT_TIMEOUT = 20
 
 FIELDNAMES = [
-    "search_ID", "profile_number", "target", "first_name", "last_name",
+    "subject_id", "profile_number", "target", "first_name", "last_name",
     "city", "state_id", "age", "response_time_s", "brokers_searched",
     "total_results", "notes", "address", "phones", "emails", "aliases",
     "relatives",
 ]
 
 
-def load_profiles(path):
-    with open(path, newline="") as f:
-        return [
-            {k: (v or "").strip() for k, v in row.items()}
-            for row in csv.DictReader(f)
-        ]
+def git_ref() -> str:
+    """Best-effort branch/commit label for the run's notes; never worth
+    failing the sweep over."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=5,
+        )
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
 
 
 def blank_row(profile, **overrides):
     """A row with every column present, so the CSV never shifts."""
     row = {name: "" for name in FIELDNAMES}
     row.update(
-        search_ID=profile["search_ID"],
+        subject_id=profile["id"],
         first_name=profile["first_name"],
         last_name=profile["last_name"],
         city=profile["city"],
@@ -78,20 +89,20 @@ def age_of(summary):
     return str(summary.age) if summary.age else (summary.age_range or "")
 
 
-async def run(profiles, runner, writer, flush):
+async def run(profiles, runner, run_pk, writer, flush):
     """
-    Run each profile, writing its rows before starting the next one.
+    Run each profile, writing its rows (CSV and DB) before starting the next.
 
     Rows are flushed per profile rather than collected and written at the end:
     a sweep is minutes of paid API calls, and an interrupted run that discards
     everything it already fetched is the worst possible failure. Killing this
-    mid-run leaves a valid CSV of the profiles that finished.
+    mid-run leaves a valid CSV, and a DB run, of the profiles that finished.
     """
     written = 0
 
     for i, profile in enumerate(profiles, 1):
-        label = profile["search_ID"]
-        print(f"{i:2}/{len(profiles)} {label:<12}", end=" ", flush=True)
+        label = profile["id"]
+        print(f"{i:2}/{len(profiles)} {label:<20}", end=" ", flush=True)
         started = time.time()
         rows = []
 
@@ -115,6 +126,10 @@ async def run(profiles, runner, writer, flush):
                 notes=str(e)[:200],
             ))
             flush()
+            # Not written to the DB: summary_results.target is constrained to
+            # actual brokers (fps/npd/anywho/zaba), and a whole-quickscan
+            # failure has no per-broker breakdown to attribute it to. The CSV
+            # row above is the record of this one.
             written += 1
             continue
 
@@ -132,11 +147,14 @@ async def run(profiles, runner, writer, flush):
             notes="Summary row with timing",
         ))
 
+        db_rows = []
+
         for broker, result in scraped.items():
             broker = broker.lower()
             timing = f"{result.timing_ms / 1000:.2f}"
 
             if result.status != "success" or not result.summaries:
+                notes = f"Status: {result.status}" + (f" ({result.error[:300]})" if result.error else "")
                 rows.append(blank_row(
                     profile,
                     profile_number="NO_RESULTS",
@@ -144,9 +162,14 @@ async def run(profiles, runner, writer, flush):
                     response_time_s=timing,
                     # Keep the whole URL visible -- for NPD the 404'd URL is the
                     # useful part when judging coverage vs a URL-format problem.
-                    notes=f"Status: {result.status}"
-                          + (f" ({result.error[:300]})" if result.error else ""),
+                    notes=notes,
                 ))
+                db_rows.append({
+                    "target": broker,
+                    "status": result.status,
+                    "response_time_ms": round(result.timing_ms),
+                    "notes": notes,
+                })
                 continue
 
             for n, summary in enumerate(result.summaries, 1):
@@ -168,10 +191,23 @@ async def run(profiles, runner, writer, flush):
                     aliases=summary.aliases,
                     relatives=summary.relatives,
                 ))
+                db_rows.append({
+                    "target": broker,
+                    "status": "success",
+                    "response_time_ms": round(result.timing_ms),
+                    "full_name": summary.full_name,
+                    "address": summary.address,
+                    "age": summary.age,
+                    "profile_url": summary.profile_url,
+                    "notes": f"Profile {n} from {broker}",
+                    "raw": summary.to_dict(),
+                })
 
         writer.writerows(rows)
         flush()
         written += len(rows)
+
+        db.insert_summary_results(run_pk, profile["id"], db_rows)
 
         # Per-broker timings inline, so a slow broker is visible while the
         # sweep runs rather than only in the CSV afterwards.
@@ -184,9 +220,12 @@ async def run(profiles, runner, writer, flush):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, default=5, help="how many profiles (default 5)")
-    parser.add_argument("--only", help="comma-separated search_IDs to run instead")
-    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
+    parser.add_argument(
+        "--group", default="quick", choices=["full", "core", "quick", "me"],
+        help="test_subjects.test_group to run (default quick)",
+    )
+    parser.add_argument("--limit", type=int, help="cap the number of profiles run")
+    parser.add_argument("--only", help="comma-separated subject ids to run instead, e.g. chris.ocker,lucas.clark")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
         "--timeout", type=int, default=DEFAULT_TIMEOUT,
@@ -196,19 +235,25 @@ def main():
     )
     args = parser.parse_args()
 
-    profiles = load_profiles(args.input)
+    db.require_configured()
+
+    profiles = db.fetch_subjects(args.group)
     if args.only:
         wanted = {s.strip() for s in args.only.split(",")}
-        profiles = [p for p in profiles if p["search_ID"] in wanted]
-    else:
+        profiles = [p for p in profiles if p["id"] in wanted]
+    if args.limit:
         profiles = profiles[: args.limit]
 
-    print(f"Testing {len(profiles)} profile(s) across {', '.join(BROKERS).upper()}")
+    if not profiles:
+        sys.exit(f"No test_subjects found for group={args.group!r} (or --only matched nothing)")
+
+    print(f"Testing {len(profiles)} profile(s) [group={args.group}] across {', '.join(BROKERS).upper()}")
     print(f"Timeout {args.timeout}s per scraper -> worst case ~{args.timeout}s per profile")
     print(f"Writing to {args.out} as each profile completes\n")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     started = time.time()
+    run_pk = db.start_run(git_ref=git_ref(), notes=f"group={args.group} limit={args.limit}")
 
     # Opened before the run and flushed per profile, so an interrupted sweep
     # keeps what it already fetched.
@@ -219,13 +264,15 @@ def main():
 
         try:
             written = asyncio.run(
-                run(profiles, SequenceRunner(timeout=args.timeout), writer, f.flush)
+                run(profiles, SequenceRunner(timeout=args.timeout), run_pk, writer, f.flush)
             )
         except KeyboardInterrupt:
-            print(f"\n⚠️  interrupted — rows already written are intact in {args.out}")
+            print(f"\n⚠️  interrupted — rows already written are intact in {args.out} and testing.summary_results")
+            db.finish_run(run_pk)
             return 130
 
-    print(f"\n✅ {written} rows in {time.time() - started:.0f}s -> {args.out}")
+    db.finish_run(run_pk)
+    print(f"\n✅ {written} rows in {time.time() - started:.0f}s -> {args.out} and testing.summary_results")
     return 0
 
 
