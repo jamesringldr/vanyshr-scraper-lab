@@ -17,6 +17,7 @@ when the summary and profile paths next get touched together.
 import json
 import logging
 import re
+from html import unescape
 from typing import Any, Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
@@ -24,6 +25,26 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger(__name__)
 
 PHONE_DIGITS = re.compile(r'\D')
+
+
+def _unescape_deep(value: Any) -> Any:
+    """
+    Recursively HTML-unescape every string in a parsed JSON-LD value.
+
+    FPS embeds names with entities left un-decoded when they contain an
+    apostrophe -- "O&#039;Connor" instead of "O'Connor" -- straight in the
+    JSON-LD, a bug on their end that JSON parsing alone doesn't fix (HTML-
+    escaping and JSON-escaping are separate layers). Decoding once here,
+    covering the whole Person block (name, relatives, addresses, ...) rather
+    than patching each field at each call site.
+    """
+    if isinstance(value, str):
+        return unescape(value)
+    if isinstance(value, list):
+        return [_unescape_deep(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _unescape_deep(v) for k, v in value.items()}
+    return value
 
 
 def extract_person(html: str) -> Optional[Dict[str, Any]]:
@@ -44,7 +65,7 @@ def extract_person(html: str) -> Optional[Dict[str, Any]]:
 
         for candidate in candidates:
             if isinstance(candidate, dict) and candidate.get('@type') == 'Person':
-                return candidate
+                return _unescape_deep(candidate)
 
     return None
 
