@@ -190,6 +190,20 @@ class FPSHtmlScraper:
                             relatives = ', '.join(names[:5])
                             break
 
+                    # AKA names sit under an <h4>AKA:</h4> heading too, but as
+                    # bullet-separated plain text ("Anna M Delaney • Anna
+                    # Delaney"), not <a> links -- a link selector like the one
+                    # above finds nothing here, which is why this was blank.
+                    aliases = ""
+                    for heading in card.find_all('h4'):
+                        if 'aka' in heading.get_text(strip=True).lower():
+                            container = heading.find_parent()
+                            heading_text = heading.get_text(strip=True)
+                            after_heading = container.get_text(strip=True)[len(heading_text):]
+                            names = [n.strip() for n in after_heading.split('•') if n.strip()]
+                            aliases = ', '.join(names[:5])
+                            break
+
                     # Extract profile URL from the profile link
                     profile_url = ""
                     profile_link = card.select_one('h3.card-title a')
@@ -204,7 +218,7 @@ class FPSHtmlScraper:
                         phone="",
                         profileUrl=profile_url,
                         email="",
-                        aliases="",
+                        aliases=aliases,
                         relatives=relatives
                     )
 
