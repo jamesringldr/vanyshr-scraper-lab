@@ -30,6 +30,7 @@ class NPDFullProfileScraper:
 
     MAX_RELATIVES = 10
     MAX_EMAILS = 10
+    MAX_ASSOCIATES = 10
 
     def __init__(self, api_key: Optional[str] = None):
         """Initialize with context.dev client"""
@@ -106,11 +107,18 @@ class NPDFullProfileScraper:
                 emails = [emails]
             profile.emailAddresses = [e.strip() for e in emails if e and e.strip()][: self.MAX_EMAILS]
 
+            # Associated people aren't in JSON-LD -- only the rendered
+            # "Associated" section has them, unlike everything else on this
+            # page. Declared in the Profile dataclass but never actually
+            # extracted until now.
+            profile.associates = self._extract_associates(BeautifulSoup(html, "html.parser"))
+
             logger.debug(
                 f"Parsed NPD profile: {profile.fullName}, "
                 f"{len(profile.emailAddresses)} emails, "
                 f"{len(profile.phoneNumbers)} phones, "
-                f"{len(profile.relatives)} relatives"
+                f"{len(profile.relatives)} relatives, "
+                f"{len(profile.associates)} associates"
             )
 
             return profile if profile.fullName else None
@@ -118,3 +126,25 @@ class NPDFullProfileScraper:
         except Exception as e:
             logger.error(f"Error parsing NPD profile HTML: {e}", exc_info=True)
             return None
+
+    def _extract_associates(self, soup) -> List[Dict[str, str]]:
+        """
+        Names under the "Associated" section heading (#person-associated) --
+        people NPD links to this person who aren't listed as relatives.
+        """
+        heading = soup.select_one("#person-associated")
+        if not heading:
+            return []
+
+        container = heading.find_parent()
+        if not container:
+            return []
+
+        names: List[Dict[str, str]] = []
+        seen = set()
+        for a in container.select("a"):
+            name = a.get_text(strip=True)
+            if name and name not in seen:
+                seen.add(name)
+                names.append({"name": name})
+        return names[: self.MAX_ASSOCIATES]

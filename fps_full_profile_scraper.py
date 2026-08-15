@@ -119,6 +119,10 @@ class FPSFullProfileScraper:
             )
             profile.emailAddresses = self._extract_emails(html)
 
+            property_details = self._extract_current_address_property(soup)
+            if property_details:
+                profile.properties = [property_details]
+
             logger.debug(
                 f"Parsed FPS profile: {profile.fullName}, "
                 f"{len(profile.emailAddresses)} emails, "
@@ -205,6 +209,59 @@ class FPSFullProfileScraper:
             age = int(match.group(1))
             return age if 0 < age < 150 else None
         return None
+
+    def _extract_current_address_property(self, soup) -> Dict[str, Any]:
+        """
+        Residence detail for the current address -- beds, baths, square
+        footage, year built, estimated value, county, and how long they've
+        lived there. FPS is the only one of the four brokers that publishes
+        this; declared in the Profile dataclass but never actually extracted
+        until now.
+
+        Example markup under #current_address_section:
+            <h2>Current Address <span>(Since October 2005)</span></h2>
+            ...413 Lovers Ln, Cameron MO 64429... Dekalb County
+            3 Beds | 1 Bath | 960 SqFt. | Built in 1981
+            <dl><dt>Estimated Value</dt><dd>$189,000</dd></dl>
+        """
+        section = soup.select_one("#current_address_section")
+        if not section:
+            return {}
+
+        result: Dict[str, Any] = {}
+
+        since_span = section.select_one("h2 span")
+        if since_span:
+            match = re.search(r"Since\s+(.+)", since_span.get_text(strip=True), re.IGNORECASE)
+            if match:
+                result["residedSince"] = match.group(1).strip(") ")
+
+        # All the residence-detail fields are scattered across a few text
+        # nodes rather than tagged individually, so pull the whole section's
+        # text and pick each figure out with its own pattern.
+        text = section.get_text(" ", strip=True)
+
+        beds = re.search(r"(\d+(?:\.\d+)?)\s*Beds?\b", text, re.IGNORECASE)
+        baths = re.search(r"(\d+(?:\.\d+)?)\s*Baths?\b", text, re.IGNORECASE)
+        sqft = re.search(r"([\d,]+)\s*SqFt", text, re.IGNORECASE)
+        built = re.search(r"Built in (\d{4})", text, re.IGNORECASE)
+        value = re.search(r"Estimated Value\s*\$?([\d,]+)", text, re.IGNORECASE)
+        county = re.search(r"([A-Za-z]+ County)", text)
+
+        if beds:
+            result["beds"] = beds.group(1)
+        if baths:
+            result["baths"] = baths.group(1)
+        if sqft:
+            result["squareFeet"] = int(sqft.group(1).replace(",", ""))
+        if built:
+            result["yearBuilt"] = int(built.group(1))
+        if value:
+            result["estimatedValue"] = int(value.group(1).replace(",", ""))
+        if county:
+            result["county"] = county.group(1).strip()
+
+        return result
 
     def _extract_emails(self, html: str) -> List[str]:
         """

@@ -73,6 +73,7 @@ class Profile:
     phoneNumbers: List[Dict[str, str]] = field(default_factory=list)
     emailAddresses: List[str] = field(default_factory=list)
     relatives: List[Dict[str, str]] = field(default_factory=list)
+    associates: List[Dict[str, str]] = field(default_factory=list)
     properties: List[Dict[str, Any]] = field(default_factory=list)
 
 
