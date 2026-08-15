@@ -29,6 +29,7 @@ be stopped without losing work.
 import argparse
 import asyncio
 import csv
+import re
 import subprocess
 import sys
 import time
@@ -87,6 +88,16 @@ def blank_row(profile, **overrides):
 def age_of(summary):
     """FPS supplies an int age; NPD and AnyWho supply a string ageRange."""
     return str(summary.age) if summary.age else (summary.age_range or "")
+
+
+def parsed_age(summary):
+    """Same fallback as age_of(), but as an int for the DB's age column --
+    NPD/AnyWho's age_range is text (e.g. "37" or "Age 37"), not the typed
+    age field, so summary.age alone misses them."""
+    if summary.age:
+        return summary.age
+    match = re.search(r"\d+", summary.age_range or "")
+    return int(match.group()) if match else None
 
 
 async def run(profiles, runner, run_pk, writer, flush):
@@ -197,8 +208,13 @@ async def run(profiles, runner, run_pk, writer, flush):
                     "response_time_ms": round(result.timing_ms),
                     "full_name": summary.full_name,
                     "address": summary.address,
-                    "age": summary.age,
+                    "age": parsed_age(summary),
                     "profile_url": summary.profile_url,
+                    "phone": summary.phone,
+                    "email": summary.email,
+                    "aliases": summary.aliases,
+                    "relatives": summary.relatives,
+                    "previous_addresses": summary.previous_addresses,
                     "notes": f"Profile {n} from {broker}",
                     "raw": summary.to_dict(),
                 })

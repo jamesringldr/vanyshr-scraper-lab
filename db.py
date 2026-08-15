@@ -79,7 +79,8 @@ def finish_run(run_pk: int) -> None:
 def insert_summary_results(run_pk: int, subject_id: str, rows: List[Dict[str, Any]]) -> None:
     """
     Each row: target, status, response_time_ms, and optionally full_name,
-    address, age, profile_url, notes, raw (a JSON-able dict).
+    address, age, profile_url, phone, email, aliases, relatives,
+    previous_addresses, notes, raw (a JSON-able dict).
     """
     if not rows:
         return
@@ -93,6 +94,11 @@ def insert_summary_results(run_pk: int, subject_id: str, rows: List[Dict[str, An
             r.get("address"),
             r.get("age"),
             r.get("profile_url"),
+            r.get("phone"),
+            r.get("email"),
+            r.get("aliases"),
+            r.get("relatives"),
+            r.get("previous_addresses"),
             r.get("response_time_ms"),
             r["status"],
             r.get("notes"),
@@ -106,6 +112,7 @@ def insert_summary_results(run_pk: int, subject_id: str, rows: List[Dict[str, An
             cur,
             "INSERT INTO testing.summary_results "
             "(run_id, subject_id, target, full_name, address, age, "
-            "profile_url, response_time_ms, status, notes, raw) VALUES %s",
+            "profile_url, phone, email, aliases, relatives, previous_addresses, "
+            "response_time_ms, status, notes, raw) VALUES %s",
             values,
         )
