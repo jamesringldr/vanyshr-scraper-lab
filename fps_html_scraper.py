@@ -65,9 +65,11 @@ class FPSHtmlScraper:
         Pattern: /name/{first}-{last}_{city}-{state}
         Example: /name/james-oehring_cameron-mo
         """
-        first = params.firstName.lower()
-        last = params.lastName.lower()
-        city = params.city.lower().replace(" ", "-")
+        # Apostrophes (e.g. "Lee's Summit") break these sites' routing if left
+        # in -- their own URLs drop the character rather than encoding it.
+        first = params.firstName.lower().replace("'", "")
+        last = params.lastName.lower().replace("'", "")
+        city = params.city.lower().replace(" ", "-").replace("'", "")
         state = params.state.lower()
 
         return f"{self.BASE_URL}{self.SEARCH_PATH}/{first}-{last}_{city}-{state}"

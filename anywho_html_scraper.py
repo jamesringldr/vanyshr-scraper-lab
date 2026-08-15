@@ -83,10 +83,12 @@ class AnyWhoHtmlScraper:
         Pattern: /people/{first}+{last}/{state-name}/{city}
         Example: /people/james+oehring/missouri/cameron
         """
-        first = params.firstName.lower()
-        last = params.lastName.lower()
+        # Apostrophes (e.g. "Lee's Summit") break these sites' routing if left
+        # in -- their own URLs drop the character rather than encoding it.
+        first = params.firstName.lower().replace("'", "")
+        last = params.lastName.lower().replace("'", "")
         state_name = self._get_state_name(params.state)
-        city = params.city.lower().replace(" ", "-")
+        city = params.city.lower().replace(" ", "-").replace("'", "")
 
         return f"{self.BASE_URL}/people/{first}+{last}/{state_name}/{city}"
 

@@ -85,10 +85,12 @@ class NPDHtmlScraper:
 
         Correct format: everything lowercase, hyphens in names and cities, trailing slash.
         """
-        first = params.firstName.lower()
-        last = params.lastName.lower()
+        # Apostrophes (e.g. "Lee's Summit") break these sites' routing if left
+        # in -- their own URLs drop the character rather than encoding it.
+        first = params.firstName.lower().replace("'", "")
+        last = params.lastName.lower().replace("'", "")
         state_abbr = self._get_state_abbr(params.state).lower()
-        city = params.city.lower().replace(" ", "-")
+        city = params.city.lower().replace(" ", "-").replace("'", "")
         letter = last[0].lower()
 
         return f"{self.BASE_URL}/people/{letter}/{first}-{last}/{state_abbr}/{city}/"
