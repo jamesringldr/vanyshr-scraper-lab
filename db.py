@@ -17,8 +17,14 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2
 import psycopg2.extras
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+# Loaded here rather than relying on sequence_runner's load_dotenv() call --
+# that runs at import time too, and which module gets imported first isn't
+# something this module should have to depend on.
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env.local"))
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
