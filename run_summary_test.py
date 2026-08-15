@@ -22,6 +22,7 @@ Usage:
     python3 run_summary_test.py --timeout 10      # tighter per-scraper bound
     python3 run_summary_test.py --out /tmp/results.csv
     python3 run_summary_test.py --group full --skip-db   # CSV only, no scrape_runs row
+    python3 run_summary_test.py --group full --limit 5 --offset 5   # 2nd batch of 5
 
 Long sweeps are worth backgrounding so progress stays visible and the run can
 be stopped without losing work.
@@ -244,6 +245,7 @@ def main():
         help="test_subjects.test_group to run (default quick)",
     )
     parser.add_argument("--limit", type=int, help="cap the number of profiles run")
+    parser.add_argument("--offset", type=int, default=0, help="skip this many profiles first, for running a group in batches")
     parser.add_argument("--only", help="comma-separated subject ids to run instead, e.g. chris.ocker,lucas.clark")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
@@ -266,6 +268,8 @@ def main():
     if args.only:
         wanted = {s.strip() for s in args.only.split(",")}
         profiles = [p for p in profiles if p["id"] in wanted]
+    if args.offset:
+        profiles = profiles[args.offset:]
     if args.limit:
         profiles = profiles[: args.limit]
 

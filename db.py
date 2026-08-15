@@ -58,7 +58,10 @@ def fetch_subjects(group: str) -> List[Dict[str, Any]]:
 
 def start_run(git_ref: str, notes: str = "") -> int:
     """Insert a scrape_runs row, return its id (the FK value other tables use)."""
-    run_id = f"summary.{datetime.now().strftime('%m.%d.%H.%M')}"
+    # Seconds, not just minutes -- back-to-back batches (run_summary_test.py
+    # --offset in sequence) can easily start within the same minute and
+    # collide on run_id's unique constraint otherwise.
+    run_id = f"summary.{datetime.now().strftime('%m.%d.%H.%M.%S')}"
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO testing.scrape_runs (run_id, git_ref, notes) "
