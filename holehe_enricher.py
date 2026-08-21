@@ -6,38 +6,27 @@ Holehe is an open-source CLI (github.com/megadose/holehe). There is no hosted
 API: the previous version of this module called https://api.holehe.io, a
 hostname that does not resolve, so account enrichment has never worked.
 
-It probes ~121 sites using password-recovery behaviour and reports, per site:
+It probes sites using password-recovery behaviour and reports, per site:
 
     [+] registered   [-] not registered   [x] the site refused to answer
 
-Measured behaviour (121 sites, holehe 1.61, from a residential connection):
+Vanyshr does not use the full 121-site catalog. `holehe_runner.py` runs only
+the high-value allowlist in `holehe_allowlist.py` (~37 consumer sites), and
+`parse_output` drops anything else so a stock CLI still cannot leak
+dominos.fr onto the hex.
 
-  runtime          4-10s per address
-  answered         ~46 of 121 sites (7 hits / 41 not-used / 74 refused)
-  repeatability    identical hit and refusal sets across runs
-  false positives  none -- a fabricated address returned zero hits
-
-A [+] can therefore be trusted. The [x] marker cannot: holehe's runner wraps
-each module in a bare `except Exception` and labels *every* failure "Rate
-limit". Probing the failing modules directly shows two unrelated causes:
-
-  - modules whose site changed shape, which fail deterministically
-    (github and snapchat raise IndexError, pinterest JSONDecodeError)
-  - modules that merely ran out of time in the 121-way concurrent burst;
-    atlassian, amazon, imgur, instagram and adobe all answer normally when
-    run on their own
-
-So the refusals are stale modules and timeouts, not IP blocking -- the figures
-above were measured from a residential connection, and a different host will
-not improve them. Recovering that coverage means patching modules or lowering
-concurrency, not changing where this runs.
+Measured behaviour (holehe 1.61, residential, 2026-08-13): a [+] is
+trustworthy (fabricated address → 0 hits). [x] is not: github / snapchat /
+pinterest / soundcloud / evernote raise before a verdict, and live probes
+show those endpoints are now DataDome or rewritten SPAs — parser patches
+do not recover them. The runner wraps those exceptions as refused.
 
 Do not pass holehe's -T/--timeout flag: in 1.61 it makes every module fail
-(120 refused in under a second).
+in under a second.
 
-Because ~62% of sites do not answer, `services_rate_limited` is reported
-alongside the hits. An empty `services_found` next to a large refusal count
-means "could not determine", never "this address is registered nowhere".
+`services_rate_limited` is reported alongside hits. An empty
+`services_found` next to a large refusal count means "could not determine",
+never "this address is registered nowhere".
 """
 
 import logging
@@ -47,6 +36,8 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from holehe_allowlist import is_high_value_domain
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +119,7 @@ class HoleheEnricher:
 
         try:
             completed = subprocess.run(
-                [self.binary, email, "--no-color", "--no-clear"],
+                self._argv(email),
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
@@ -157,13 +148,23 @@ class HoleheEnricher:
             services_rate_limited=parsed["services_rate_limited"],
         )
 
+    def _argv(self, email: str) -> List[str]:
+        """Prefer the allowlisted runner when the venv python is next to the binary."""
+        runner = Path(__file__).resolve().parent / "holehe_runner.py"
+        if self.binary and runner.is_file():
+            python = Path(self.binary).parent / "python3"
+            if python.is_file():
+                return [str(python), str(runner), email, "--no-color", "--no-clear"]
+        return [self.binary, email, "--no-color", "--no-clear"]
+
     @classmethod
     def parse_output(cls, stdout: str) -> Dict[str, Any]:
         """
         Pull the per-site verdicts out of holehe's terminal output.
 
         Progress bars, the banner and the legend are all interleaved with the
-        results, so lines are matched strictly.
+        results, so lines are matched strictly. Niche sites are discarded even
+        if a stock holehe binary was used.
         """
         found: List[str] = []
         checked = 0
@@ -176,6 +177,9 @@ class HoleheEnricher:
                 continue
 
             marker, service = match.groups()
+            if not is_high_value_domain(service):
+                continue
+
             checked += 1
             if marker == "+":
                 if service not in found:
@@ -193,7 +197,7 @@ class HoleheEnricher:
         """
         Check several addresses in sequence.
 
-        Each run takes seconds and makes ~121 outbound requests, so callers
+        Each run takes seconds and probes the high-value allowlist, so callers
         should pass a shortlist rather than every address a scrape turned up.
         """
         return {email: self.enrich_email(email) for email in emails}
