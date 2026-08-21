@@ -6,10 +6,11 @@ results, and the legend line ("[+] Email used, [-] Email not used, ...") has
 the same prefix as a real hit -- counting it inflated every measurement I took
 before the parser required a domain shape.
 
-The coverage caveat is the important one: on the recorded runs 74-77 of 121
-sites refused to answer, so an empty `services_found` beside a large
-`services_rate_limited` means "could not determine", not "no accounts". These
-tests keep the two reported together.
+The coverage caveat is the important one: even after the high-value allowlist,
+many remaining sites refuse to answer, so an empty `services_found` beside a
+non-zero `services_rate_limited` means "could not determine", not "no
+accounts". These tests keep the two reported together. Niche sites
+(dominos.fr, forums, adult, CRM) must not appear in `services_found`.
 
 No subprocess is launched here; the recorded stdout is replayed.
 """
@@ -92,9 +93,22 @@ class TestParsing:
     def test_counts_every_verdict(self, enricher, replay):
         replay("found_gmail")
         result = enricher.enrich_email("a@b.com")
-        # 7 hits + 41 not-used + 74 refused
-        assert result["services_checked"] == 122
-        assert result["services_rate_limited"] == 74
+        # High-value slice of the recorded 121-site run: 7 hits / 13 unused / 18 refused
+        assert result["services_checked"] == 38
+        assert result["services_rate_limited"] == 18
+
+    def test_drops_niche_sites(self, enricher):
+        stdout = (
+            "[+] twitter.com\n"
+            "[+] dominos.fr\n"
+            "[+] pornhub.com\n"
+            "[+] armurerie-auxerre.com\n"
+            "[x] instagram.com\n"
+        )
+        parsed = HoleheEnricher.parse_output(stdout)
+        assert parsed["services_found"] == ["twitter.com"]
+        assert parsed["services_checked"] == 2
+        assert parsed["services_rate_limited"] == 1
 
 
 class TestCoverageHonesty:
@@ -111,7 +125,8 @@ class TestCoverageHonesty:
         replay("no_accounts")
         result = enricher.enrich_email("nobody@gmail.com")
         assert result["services_found"] == []
-        assert result["services_rate_limited"] >= 70, (
+        assert result["services_checked"] > 0
+        assert result["services_rate_limited"] >= 15, (
             "an empty result must carry its refusal count, or it reads as "
             "'not registered anywhere'"
         )
