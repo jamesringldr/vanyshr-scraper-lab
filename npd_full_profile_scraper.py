@@ -17,6 +17,7 @@ from targets.npd.models import Profile
 from jsonld_profile import (
     age_from_birth_date,
     extract_person,
+    format_phone,
     format_phones,
     related_names,
     split_home_locations,
@@ -93,6 +94,7 @@ class NPDFullProfileScraper:
                 logger.warning("No JSON-LD Person block on NPD profile page")
                 return None
 
+            soup = BeautifulSoup(html, "html.parser")
             profile = Profile(profileId=profile_id)
             profile.fullName = (person.get("name") or "").strip()
 
@@ -102,11 +104,13 @@ class NPDFullProfileScraper:
                 profile.age = age_from_birth_date(birth)
 
             profile.phoneNumbers = format_phones(person.get("telephone"))
+            self._apply_phone_types(profile.phoneNumbers, soup)
             profile.relatives = related_names(person.get("relatedTo"), limit=self.MAX_RELATIVES)
             profile.currentAddress, profile.previousAddresses = split_home_locations(
                 # NPD capitalises the key, unlike schema.org's homeLocation
                 person.get("HomeLocation") or person.get("homeLocation")
             )
+            self._apply_address_years(profile.previousAddresses, soup)
 
             emails = person.get("email") or []
             if isinstance(emails, str):
@@ -117,7 +121,7 @@ class NPDFullProfileScraper:
             # "Associated" section has them, unlike everything else on this
             # page. Declared in the Profile dataclass but never actually
             # extracted until now.
-            profile.associates = self._extract_associates(BeautifulSoup(html, "html.parser"))
+            profile.associates = self._extract_associates(soup)
 
             logger.debug(
                 f"Parsed NPD profile: {profile.fullName}, "
@@ -132,6 +136,77 @@ class NPDFullProfileScraper:
         except Exception as e:
             logger.error(f"Error parsing NPD profile HTML: {e}", exc_info=True)
             return None
+
+    @staticmethod
+    def _apply_phone_types(phones: List[Dict[str, str]], soup) -> None:
+        """
+        Fill in "Landline"/"Mobile" from #person-current-phone, matched to
+        the JSON-LD-derived numbers already in `phones`. JSON-LD only has
+        the bare digits (format_phones hardcodes "type": "unknown"), but the
+        rendered card states the type right next to each number.
+        """
+        heading = soup.select_one("#person-current-phone")
+        if not heading:
+            return
+        container = heading.find_parent()
+        if not container:
+            return
+
+        types: Dict[str, str] = {}
+        for row in container.select(".name-cards-block__text > div"):
+            spans = row.find_all("span", recursive=False)
+            if len(spans) < 2:
+                continue
+            number = format_phone(spans[0].get_text(strip=True))
+            phone_type = spans[1].get_text(strip=True).strip("()")
+            if number and phone_type:
+                types[number] = phone_type
+
+        for phone in phones:
+            phone_type = types.get(phone.get("number", ""))
+            if phone_type:
+                phone["type"] = phone_type
+
+    # "Last reported in 2015" next to each previous address
+    LAST_REPORTED = re.compile(r'Last reported in (\d{4})')
+
+    @classmethod
+    def _apply_address_years(cls, addresses: List[Dict[str, str]], soup) -> None:
+        """
+        Fill in `yearsActive` from #person-previous-address, matched to the
+        JSON-LD-derived addresses already in `addresses` by their normalised
+        formatted string -- the DOM comma-separates city/state/zip
+        ("Kansas City, MO, 64106") where place_to_address() space-separates
+        them ("Kansas City MO 64106"), so commas are stripped before compare.
+        """
+        heading = soup.select_one("#person-previous-address")
+        if not heading:
+            return
+        container = heading.find_parent()
+        if not container:
+            return
+
+        years: Dict[str, str] = {}
+        for row in container.select(".flex-line"):
+            spans = row.find_all("span", recursive=False)
+            if len(spans) < 2:
+                continue
+            match = cls.LAST_REPORTED.match(spans[1].get_text(strip=True))
+            if not match:
+                continue
+            key = cls._normalise_address(spans[0].get_text(strip=True))
+            if key:
+                years[key] = match.group(1)
+
+        for address in addresses:
+            key = cls._normalise_address(address.get("formatted", ""))
+            year = years.get(key)
+            if year:
+                address["yearsActive"] = year
+
+    @staticmethod
+    def _normalise_address(text: str) -> str:
+        return re.sub(r'\s+', ' ', text.replace(',', '')).strip().lower()
 
     def _extract_associates(self, soup) -> List[Dict[str, str]]:
         """

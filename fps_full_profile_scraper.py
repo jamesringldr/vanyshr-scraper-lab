@@ -19,6 +19,7 @@ from context.dev import ContextDev
 from targets.fps.models import Profile
 from jsonld_profile import (
     extract_person,
+    format_phone,
     format_phones,
     related_names,
     split_home_locations,
@@ -109,8 +110,11 @@ class FPSFullProfileScraper:
                 profile.fullName = " ".join(p for p in (given, family) if p)
 
             profile.age = self._extract_age(soup)
+            profile.bornDate = self._extract_born_date(soup)
             profile.phoneNumbers = format_phones(person.get("telephone"))
+            self._apply_phone_details(profile.phoneNumbers, soup)
             profile.relatives = related_names(person.get("relatedTo"), limit=self.MAX_RELATIVES)
+            self._apply_relative_details(profile.relatives, soup)
             profile.currentAddress, profile.previousAddresses = split_home_locations(
                 person.get("homeLocation")
             )
@@ -152,6 +156,10 @@ class FPSFullProfileScraper:
         street = (address.get("street") or "").lower().replace(".", "")
         return re.sub(r'\s+', ' ', street).strip()
 
+    # "Jackson County" / "Recorded July 2020" -- the two <dd>s sitting next to
+    # each address link, previously ignored in favour of the link alone.
+    RECORDED = re.compile(r'Recorded\s+(.+)', re.IGNORECASE)
+
     @classmethod
     def _extract_previous_addresses(cls, soup, current: Dict[str, str]) -> List[Dict[str, str]]:
         """
@@ -159,6 +167,8 @@ class FPSFullProfileScraper:
 
         The visible link text is only the city and state; the full street
         address is in the anchor's title attribute, same as on the search page.
+        Each address's <dl> also carries a county and a "Recorded <date>" <dd>,
+        sitting right next to the link.
         """
         section = soup.select_one('#previous-addresses')
         if not section:
@@ -168,7 +178,10 @@ class FPSFullProfileScraper:
         addresses: List[Dict[str, str]] = []
         seen = {current_key} if current_key else set()
 
-        for link in section.find_all('a', href=re.compile(r'/address/')):
+        for dl in section.select('dl'):
+            link = dl.find('a', href=re.compile(r'/address/'))
+            if not link:
+                continue
             title = (link.get('title') or '').strip()
             match = cls.ADDRESS_TITLE.search(title)
             if not match:
@@ -192,6 +205,15 @@ class FPSFullProfileScraper:
             if key in seen:
                 continue
             seen.add(key)
+
+            for dd in dl.select('dd'):
+                text = dd.get_text(strip=True)
+                recorded = cls.RECORDED.match(text)
+                if recorded:
+                    address["recordedDate"] = recorded.group(1).strip()
+                elif text.lower().endswith('county'):
+                    address["county"] = text
+
             addresses.append(address)
 
         return addresses
@@ -211,6 +233,122 @@ class FPSFullProfileScraper:
             age = int(match.group(1))
             return age if 0 < age < 150 else None
         return None
+
+    @staticmethod
+    def _extract_born_date(soup) -> str:
+        """
+        Birth month/year from the profile header, e.g. "Age 61, Born June
+        1965" -- sitting right next to the age this scraper already reads,
+        previously discarded.
+        """
+        header = soup.select_one("#details-summary, .details-summary, h1")
+        region = header.parent if header and header.parent else soup
+        match = re.search(r"Born\s+([A-Za-z]+\s+\d{4})", region.get_text(" ", strip=True))
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def _name_key(name: str) -> tuple:
+        """
+        (first, last) name key, ignoring middle names and suffixes, so a
+        JSON-LD name ("Robert J Mctarsney Jr") matches its DOM counterpart
+        ("Robert Mctarsney").
+        """
+        suffixes = {'jr', 'sr', 'ii', 'iii', 'iv', 'v'}
+        tokens = [t.strip('.') for t in name.split() if t.strip('.')]
+        while tokens and tokens[-1].lower() in suffixes:
+            tokens.pop()
+        if not tokens:
+            return ("", "")
+        return (tokens[0].lower(), tokens[-1].lower())
+
+    @classmethod
+    def _apply_phone_details(cls, phones: List[Dict[str, str]], soup) -> None:
+        """
+        Fill in type/carrier/firstReported from the "Phone Numbers" section,
+        matched to the JSON-LD-derived numbers already in `phones`. JSON-LD
+        only has the bare digits (format_phones hardcodes "type": "unknown"),
+        but the rendered page carries real structured detail per number.
+        """
+        section = soup.select_one('#phone_number_section')
+        if not section:
+            return
+
+        details: Dict[str, Dict[str, str]] = {}
+        for dl in section.select('dl'):
+            link = dl.find('a')
+            if not link:
+                continue
+            number = format_phone(link.get_text(strip=True))
+            if not number:
+                continue
+            entry: Dict[str, str] = {}
+            for dd in dl.select('dd'):
+                text = dd.get_text(" ", strip=True)
+                if text.lower().startswith('first reported'):
+                    span = dd.select_one('span')
+                    entry['firstReported'] = (
+                        span.get_text(strip=True) if span
+                        else text[len('first reported'):].strip()
+                    )
+                elif 'type' not in entry:
+                    entry['type'] = text
+                elif 'carrier' not in entry:
+                    entry['carrier'] = text
+            if entry:
+                details[number] = entry
+
+        for phone in phones:
+            extra = details.get(phone.get('number', ''))
+            if extra:
+                phone.update(extra)
+
+    @classmethod
+    def _apply_relative_details(cls, relatives: List[Dict[str, str]], soup) -> None:
+        """
+        Fill in age/birth month from the "Relatives" section, matched to the
+        JSON-LD-derived names already in `relatives` by (first, last) name --
+        JSON-LD carries full middle names/suffixes the DOM doesn't.
+        """
+        section = soup.select_one('#relative-links')
+        if not section:
+            return
+
+        details: Dict[tuple, Dict[str, str]] = {}
+        for dl in section.select('dl'):
+            link = dl.select_one('dt a')
+            dd = dl.select_one('dd')
+            if not link or not dd:
+                continue
+            key = cls._name_key(link.get_text(strip=True))
+            if key == ("", "") or key in details:
+                continue
+            match = re.match(
+                r'Age\s+(\d{1,3})\s*\(([A-Za-z]+\s+\d{4})\)', dd.get_text(strip=True)
+            )
+            if match:
+                details[key] = {"age": match.group(1), "birthMonth": match.group(2)}
+
+        for relative in relatives:
+            extra = details.get(cls._name_key(relative.get('name', '')))
+            if extra:
+                relative.update(extra)
+
+    # Labels in the #current_property_data <dl> pairs not already covered by
+    # the free-text regexes below (beds/baths/sqft/built/value/county). Value
+    # keys ending in these three get their currency/commas stripped to ints;
+    # the rest are kept as plain text.
+    PROPERTY_LABEL_MAP = {
+        "Estimated Equity": "estimatedEquity",
+        "Last Sale Amount": "lastSaleAmount",
+        "Last Sale Date": "lastSaleDate",
+        "Occupancy Type": "occupancyType",
+        "Ownership Type": "ownershipType",
+        "Land Use": "landUse",
+        "Property Class": "propertyClass",
+        "Subdivision": "subdivision",
+        "Lot SqFt.": "lotSqFt",
+    }
+    PROPERTY_NUMERIC_FIELDS = {"estimatedEquity", "lastSaleAmount", "lotSqFt"}
 
     def _extract_current_address_property(self, soup) -> Dict[str, Any]:
         """
@@ -262,6 +400,28 @@ class FPSFullProfileScraper:
             result["estimatedValue"] = int(value.group(1).replace(",", ""))
         if county:
             result["county"] = county.group(1).strip()
+
+        # The rest (equity, last sale, occupancy/ownership/land-use/class,
+        # subdivision, lot size) live in a separate #current_property_data
+        # box as clean <dt>/<dd> pairs rather than free text -- declared in
+        # the Profile dataclass's properties field but never read until now.
+        property_data = soup.select_one("#current_property_data")
+        if property_data:
+            for dl in property_data.select("dl"):
+                dt = dl.select_one("dt")
+                dd = dl.select_one("dd")
+                if not dt or not dd:
+                    continue
+                key = self.PROPERTY_LABEL_MAP.get(dt.get_text(strip=True))
+                if not key or key in result:
+                    continue
+                value = dd.get_text(strip=True)
+                if key in self.PROPERTY_NUMERIC_FIELDS:
+                    digits = re.sub(r"[^\d]", "", value)
+                    if digits:
+                        result[key] = int(digits)
+                elif value:
+                    result[key] = value
 
         return result
 

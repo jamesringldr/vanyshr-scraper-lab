@@ -28,6 +28,7 @@ class Profile:
     profileId: str = ""
     fullName: str = ""
     age: Optional[int] = None
+    bornDate: str = ""  # e.g. "June 1965" -- month/year only, FPS never gives a day
     currentAddress: Dict[str, str] = field(default_factory=dict)
     previousAddresses: List[Dict[str, str]] = field(default_factory=list)
     phoneNumbers: List[Dict[str, str]] = field(default_factory=list)

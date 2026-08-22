@@ -238,14 +238,17 @@ class AnyWhoFullProfileScraper:
                 continue
             seen.add(number)
 
-            # Text between this number and the next describes it
+            # Text between this number and the next describes it: city/state
+            # before the bullet, carrier after -- the city/state half was
+            # computed and then discarded.
             tail = text[match.end(): matches[i + 1].start() if i + 1 < len(matches) else len(text)]
-            carrier = ""
             parts = [p.strip() for p in tail.split('•') if p.strip()]
-            if len(parts) > 1:
-                carrier = self.UI_TAIL.split(parts[1])[0].strip()[:60]
+            location = parts[0][:60] if parts else ""
+            carrier = self.UI_TAIL.split(parts[1])[0].strip()[:60] if len(parts) > 1 else ""
 
-            phones.append({"number": number, "type": "unknown", "carrier": carrier})
+            phones.append({
+                "number": number, "type": "unknown", "carrier": carrier, "location": location,
+            })
 
         return phones[: self.MAX_VALUES]
 
@@ -347,8 +350,31 @@ class AnyWhoFullProfileScraper:
             if years:
                 # Residency range, e.g. 2005-2025 -- useful for recency ranking
                 address["years"] = f"{years.group(1)}-{years.group(2)}"
+            # A third child, when present, is a sentence naming the property
+            # type ("James lived here in this Single Family Residential from
+            # 2005 to 2025") -- computed alongside street/city and discarded.
+            if len(children) >= 3:
+                property_type = self._property_type(children[2])
+                if property_type:
+                    address["propertyType"] = property_type
             addresses.append(address)
         return addresses[: self.MAX_VALUES]
+
+    # "resided"/"lived here in this <TYPE>", optionally followed by a date
+    # range ("from 2005 to 2025") or a single year ("in 2020")
+    PROPERTY_DATE_RANGE = re.compile(r'\s+from\s+\d{4}\s+to\s+\d{4}\s*$', re.IGNORECASE)
+    PROPERTY_SINGLE_YEAR = re.compile(r'\s+in\s+\d{4}\s*$', re.IGNORECASE)
+
+    @classmethod
+    def _property_type(cls, sentence: str) -> str:
+        """Strip the surrounding sentence down to just the land-use type."""
+        text = sentence.split('in this ', 1)
+        if len(text) < 2:
+            return ""
+        remainder = text[1]
+        remainder = cls.PROPERTY_DATE_RANGE.sub('', remainder)
+        remainder = cls.PROPERTY_SINGLE_YEAR.sub('', remainder)
+        return remainder.strip()
 
     def _extract_relatives(self, soup) -> List[Dict[str, Any]]:
         """

@@ -153,8 +153,29 @@ class TestFps:
         assert len(fps.relatives) == 45
         assert fps.relatives[0]["name"] == "Rickilinda R Oehring"
 
+    def test_relative_demographics_matched_from_dom(self, fps):
+        # Age/birth month live only in the DOM's Relatives section and were
+        # previously dropped; matched to the JSON-LD name by (first, last)
+        # since the DOM drops middle names/suffixes ("Robert Mctarsney" vs
+        # "Robert J Mctarsney Jr").
+        assert all("age" in r and "birthMonth" in r for r in fps.relatives)
+        assert fps.relatives[0]["age"] == "65"
+        assert fps.relatives[0]["birthMonth"] == "May 1961"
+
+    def test_born_date(self, fps):
+        # "Age 61, Born June 1965" -- the born half was ignored
+        assert fps.bornDate == "June 1965"
+
     def test_only_real_phone(self, fps):
         assert [p["number"] for p in fps.phoneNumbers] == ["(816) 632-2218"]
+
+    def test_phone_details(self, fps):
+        # Type/carrier/first-reported sit right in the Phone Numbers section
+        # next to the number this scraper already reads
+        phone = fps.phoneNumbers[0]
+        assert phone["type"] == "Landline"
+        assert phone["carrier"]
+        assert re.fullmatch(r'[A-Za-z]+ \d{4}', phone["firstReported"])
 
     def test_emails_are_personal(self, fps):
         assert "ja_studly@hotmail.com" in fps.emailAddresses
@@ -174,11 +195,29 @@ class TestFps:
             assert_street_address(address["formatted"], "fps previous")
             assert re.fullmatch(r'\d{5}(-\d{4})?', address["postalCode"])
 
+    def test_previous_addresses_have_county_and_recorded_date(self, fps):
+        # Each address's own <dl> carries a county and "Recorded <date>" <dd>
+        # right next to the link this scraper already reads
+        for address in fps.previousAddresses:
+            assert address["county"].endswith("County")
+            assert re.fullmatch(r'[A-Za-z]+ \d{4}', address["recordedDate"])
+
     def test_current_address_not_repeated(self, fps):
         current = fps.currentAddress["street"].lower()
         assert current not in [
             (a.get("street") or "").lower() for a in fps.previousAddresses
         ]
+
+    def test_property_details(self, fps):
+        # Declared on Profile.properties but only beds/baths/sqft/built/value
+        # were ever read; occupancy/ownership/land-use/class/lot-size live in
+        # a separate #current_property_data box as clean <dt>/<dd> pairs
+        details = fps.properties[0]
+        assert details["occupancyType"] == "Owner Occupied"
+        assert details["ownershipType"] == "Individual"
+        assert details["landUse"] == "Single Family"
+        assert details["propertyClass"] == "Residential"
+        assert details["lotSqFt"] == 8712
 
 
 class TestNpd:
@@ -199,12 +238,26 @@ class TestNpd:
             "(816) 632-2218", "(816) 225-8592"
         }
 
+    def test_phone_types(self, npd):
+        # "(816) 632-2218 (Landline)" sits right next to the number this
+        # scraper already reads; format_phones() used to hardcode "unknown"
+        by_number = {p["number"]: p["type"] for p in npd.phoneNumbers}
+        assert by_number["(816) 632-2218"] == "Landline"
+        assert by_number["(816) 225-8592"] == "Mobile"
+
     def test_emails(self, npd):
         assert len(npd.emailAddresses) == 5
         assert "ja_studly@hotmail.com" in npd.emailAddresses
 
     def test_relatives(self, npd):
         assert [r["name"] for r in npd.relatives] == ["Rickilinda Oehring"]
+
+    def test_previous_addresses_have_years_active(self, npd):
+        # "Last reported in 2015" in #person-previous-address, matched to the
+        # JSON-LD address by normalising away the comma-placement difference
+        assert npd.previousAddresses, "fixture should have address history"
+        for address in npd.previousAddresses:
+            assert re.fullmatch(r'\d{4}', address["yearsActive"]), address
 
 
 class TestAnyWho:
@@ -221,6 +274,13 @@ class TestAnyWho:
     def test_carrier_has_no_ui_text(self, anywho):
         for phone in anywho.phoneNumbers:
             assert "More" not in phone["carrier"], phone
+
+    def test_phone_location(self, anywho):
+        # "816-225-8592Kansas City, MO•AT&T" -- the city/state half was
+        # computed alongside carrier and discarded
+        by_number = {p["number"]: p for p in anywho.phoneNumbers}
+        assert by_number["(816) 225-8592"]["location"] == "Kansas City, MO"
+        assert by_number["(816) 632-2218"]["location"] == "Cameron, MO"
 
     def test_emails_are_clean(self, anywho):
         # Flattening the card glued neighbouring words onto each address
@@ -283,6 +343,16 @@ class TestAnyWho:
         formatted = anywho.currentAddress.get("formatted")
         assert formatted not in [a["formatted"] for a in anywho.previousAddresses]
 
+    def test_property_type_captured(self, anywho):
+        # "James lived here in this Single Family Residential from 2005 to
+        # 2025" -- a sibling of the street/city-state children this scraper
+        # already reads, previously ignored
+        typed = [a for a in anywho.previousAddresses if a.get("propertyType")]
+        assert typed, "no property types captured"
+        for address in typed:
+            assert "lived here" not in address["propertyType"]
+            assert not re.search(r'\bfrom\s+\d{4}\s+to\s+\d{4}$', address["propertyType"])
+
     def test_family_members(self, anywho):
         assert [f["name"] for f in anywho.familyMembers] == ["Rickilinda Oehring"]
 
@@ -303,6 +373,15 @@ class TestSecondFixtures:
         assert len(profile.previousAddresses) > 5
         for address in profile.previousAddresses:
             assert_street_address(address["formatted"], "fps clark previous")
+        assert all(p.get("type") and p.get("carrier") for p in profile.phoneNumbers)
+        assert all("age" in r for r in profile.relatives)
+        assert profile.bornDate == "December 1991"
+        # Fields only this fixture's property box has, unlike oehring's
+        details = profile.properties[0]
+        assert details["subdivision"] == "Rockhill Manor"
+        assert details["estimatedEquity"] == 39813
+        assert details["lastSaleAmount"] == 451535
+        assert details["lastSaleDate"] == "2023-04-19"
 
     def test_anywho_rodgers(self):
         profile = AnyWhoFullProfileScraper(api_key="t")._parse_profile_html(
@@ -313,3 +392,5 @@ class TestSecondFixtures:
         assert profile.emailAddresses
         for email in profile.emailAddresses:
             assert email.count("@") == 1
+        assert all(p.get("location") for p in profile.phoneNumbers)
+        assert any(a.get("propertyType") for a in profile.previousAddresses)
