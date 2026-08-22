@@ -111,10 +111,14 @@ class FPSFullProfileScraper:
 
             profile.age = self._extract_age(soup)
             profile.bornDate = self._extract_born_date(soup)
+            profile.aliases = self._extract_aliases(person, soup)
             profile.phoneNumbers = format_phones(person.get("telephone"))
             self._apply_phone_details(profile.phoneNumbers, soup)
             profile.relatives = related_names(person.get("relatedTo"), limit=self.MAX_RELATIVES)
             self._apply_relative_details(profile.relatives, soup)
+            for relative in profile.relatives:
+                relative["source"] = "relative"
+            profile.relatives.extend(self._extract_associates(soup))
             profile.currentAddress, profile.previousAddresses = split_home_locations(
                 person.get("homeLocation")
             )
@@ -128,6 +132,10 @@ class FPSFullProfileScraper:
             property_details = self._extract_current_address_property(soup)
             if property_details:
                 profile.properties = [property_details]
+
+            profile.employment = self._extract_current_employment(soup)
+            profile.jobHistory = self._extract_work_experience(soup)
+            profile.education = self._extract_education(soup)
 
             logger.debug(
                 f"Parsed FPS profile: {profile.fullName}, "
@@ -332,6 +340,146 @@ class FPSFullProfileScraper:
             extra = details.get(cls._name_key(relative.get('name', '')))
             if extra:
                 relative.update(extra)
+
+    @staticmethod
+    def _extract_aliases(person: Dict[str, Any], soup) -> List[str]:
+        """
+        Names from JSON-LD additionalName plus the "Also Known As" section --
+        the two sources are usually the same names, so this dedupes rather
+        than concatenating.
+        """
+        aliases: List[str] = []
+        seen = set()
+
+        additional = person.get("additionalName")
+        values = additional if isinstance(additional, list) else [additional] if additional else []
+        for value in values:
+            name = (value or "").strip()
+            if name and name.lower() not in seen:
+                seen.add(name.lower())
+                aliases.append(name)
+
+        section = soup.select_one('#aka-links')
+        if section:
+            for h3 in section.select('h3'):
+                name = h3.get_text(strip=True)
+                if name and name.lower() not in seen:
+                    seen.add(name.lower())
+                    aliases.append(name)
+
+        return aliases
+
+    @staticmethod
+    def _extract_associates(soup) -> List[Dict[str, str]]:
+        """
+        Names under "Associates" (#associate-links) -- same dl/dt-a/dd shape
+        as #relative-links, so age/birth month come along the same way.
+        Folded into profile.relatives by the caller, tagged "associate".
+        """
+        section = soup.select_one('#associate-links')
+        if not section:
+            return []
+
+        associates: List[Dict[str, str]] = []
+        seen = set()
+        for dl in section.select('dl'):
+            link = dl.select_one('dt a')
+            if not link:
+                continue
+            name = link.get_text(strip=True)
+            if not name or name in seen:
+                continue
+            seen.add(name)
+
+            entry = {"name": name, "source": "associate"}
+            dd = dl.select_one('dd')
+            if dd:
+                match = re.match(
+                    r'Age\s+(\d{1,3})\s*\(([A-Za-z]+\s+\d{4})\)', dd.get_text(strip=True)
+                )
+                if match:
+                    entry["age"] = match.group(1)
+                    entry["birthMonth"] = match.group(2)
+            associates.append(entry)
+
+        return associates
+
+    @staticmethod
+    def _extract_current_employment(soup) -> List[Dict[str, str]]:
+        """
+        #current_employment_section: one <dl> per employer, <dt> = employer,
+        <dd>s are a mix of plain location text and "Title:"/"Since:" prefixed
+        values -- prefix presence, not position, says which is which.
+        """
+        section = soup.select_one('#current_employment_section')
+        if not section:
+            return []
+
+        jobs: List[Dict[str, str]] = []
+        for dl in section.select('dl'):
+            dt = dl.select_one('dt')
+            if not dt:
+                continue
+            job = {"employer": dt.get_text(strip=True)}
+            for dd in dl.select('dd'):
+                text = dd.get_text(strip=True)
+                lowered = text.lower()
+                if lowered.startswith('title:'):
+                    job['title'] = text[len('title:'):].strip()
+                elif lowered.startswith('since:'):
+                    job['since'] = text[len('since:'):].strip()
+                elif text:
+                    job['location'] = text
+            jobs.append(job)
+        return jobs
+
+    @staticmethod
+    def _extract_work_experience(soup) -> List[Dict[str, str]]:
+        """
+        #work_experience_section: one <dl> per job, <dt> = employer, first
+        <dd> = title, second (when present) = duration -- no prefixes here,
+        unlike #current_employment_section, so this one is positional.
+        """
+        section = soup.select_one('#work_experience_section')
+        if not section:
+            return []
+
+        jobs: List[Dict[str, str]] = []
+        for dl in section.select('dl'):
+            dt = dl.select_one('dt')
+            if not dt:
+                continue
+            dds = dl.select('dd')
+            job = {"employer": dt.get_text(strip=True)}
+            if dds:
+                job['title'] = dds[0].get_text(strip=True)
+            if len(dds) > 1:
+                job['duration'] = dds[1].get_text(strip=True)
+            jobs.append(job)
+        return jobs
+
+    @staticmethod
+    def _extract_education(soup) -> List[Dict[str, Any]]:
+        """
+        #education_section: one <dl> per school, <dt> = school name, <dd>s
+        are degree/field with no labels distinguishing them -- kept as an
+        ordered list rather than guessing which is which.
+        """
+        section = soup.select_one('#education_section')
+        if not section:
+            return []
+
+        entries: List[Dict[str, Any]] = []
+        for dl in section.select('dl'):
+            dt = dl.select_one('dt')
+            if not dt:
+                continue
+            entry: Dict[str, Any] = {"school": dt.get_text(strip=True)}
+            details = [dd.get_text(strip=True) for dd in dl.select('dd') if dd.get_text(strip=True)]
+            if details:
+                entry["details"] = details
+            entries.append(entry)
+        return entries
 
     # Labels in the #current_property_data <dl> pairs not already covered by
     # the free-text regexes below (beds/baths/sqft/built/value/county). Value

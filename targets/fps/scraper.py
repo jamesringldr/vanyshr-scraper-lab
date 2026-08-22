@@ -213,7 +213,6 @@ class FPSScraper:
                 for rel in (extracted_data.get("relatives") or [])
                 if rel
             ],
-            associates=[],
             properties=[]
         )
 

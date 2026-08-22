@@ -31,6 +31,7 @@ from context.dev import ContextDev
 sys.path.insert(0, str(Path(__file__).parent))
 
 from targets.zaba.models import ScrapeOutput, SummaryResult, Profile
+from jsonld_profile import age_from_birth_date, extract_all_persons, related_names
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +231,32 @@ class ZabaHtmlScraper:
                 emails.append(value)
         return emails[: self.MAX_VALUES]
 
+    @classmethod
+    def _extract_job_history(cls, card) -> List[Dict[str, str]]:
+        """
+        "Job History": <li><p><strong>Name</strong><br>Title</p><p>Employer</p></li>
+        -- a distinct, overlapping-but-not-identical list from "Jobs" (not
+        extracted; a separately-formatted title/employer/date-range list with
+        some titles this one lacks and vice versa).
+        """
+        section = cls._section(card, "Job History")
+        if not section:
+            return []
+
+        jobs: List[Dict[str, str]] = []
+        for li in section.find_all('li'):
+            paragraphs = li.find_all('p')
+            if not paragraphs:
+                continue
+            # First <p> is "<Name><br>Title" -- the name repeats on every
+            # entry, so only the line after the <br> is the title.
+            lines = cls._lines(paragraphs[0])
+            title = lines[1] if len(lines) > 1 else (lines[0] if lines else "")
+            employer = cls._clean(paragraphs[1].get_text()) if len(paragraphs) > 1 else ""
+            if title or employer:
+                jobs.append({"title": title, "employer": employer})
+        return jobs[: cls.MAX_VALUES]
+
     def _extract_profiles_from_html(self, html: str) -> List[Profile]:
         """Extract every person card on the page as a full Profile."""
         soup = BeautifulSoup(html, 'html.parser')
@@ -282,6 +309,17 @@ class ZabaHtmlScraper:
                         if value and value not in aliases:
                             aliases.append(value)
 
+                # Associates are folded into relatives too, each tagged --
+                # displayed as one family & friends list, the user sorts out
+                # who's who during onboarding rather than the scraper guessing.
+                relatives = [
+                    {"name": n, "source": "relative"}
+                    for n in self._list_items(card, "Possible Relatives")
+                ] + [
+                    {"name": n, "source": "associate"}
+                    for n in self._list_items(card, "Possible Associations")
+                ]
+
                 profiles.append(Profile(
                     profileId=card.get('data-id', '') or f"zaba_{len(profiles)}",
                     fullName=full_name,
@@ -289,14 +327,51 @@ class ZabaHtmlScraper:
                     currentAddress=current,
                     phoneNumbers=self._parse_phones(card),
                     emailAddresses=self._parse_emails(card),
-                    relatives=[{"name": n} for n in self._list_items(card, "Possible Relatives")],
+                    relatives=relatives,
                     aliases=aliases[: self.MAX_VALUES],
                     pastAddresses=past,
+                    jobHistory=self._extract_job_history(card),
+                    education=self._list_items(card, "Education"),
                 ))
 
             except Exception as e:
                 logger.warning(f"Error parsing Zaba person card: {e}")
                 continue
+
+        # birthDate and a relatives fallback come from JSON-LD, which this
+        # scraper otherwise never reads. Zaba publishes one standalone
+        # top-level Person block per person on the page (a richer nested
+        # ProfilePage.mainEntity block also exists, but only for the first
+        # result, so it isn't used here for uniform behaviour across N
+        # results). Matched to each card by position, since both render in
+        # the same order; only applied when the counts agree and the JSON-LD
+        # person's derived age is close to the card's own, as a guard against
+        # a mismatched pairing silently attaching the wrong person's data.
+        persons = extract_all_persons(html)
+        if len(persons) == len(profiles):
+            for profile, person in zip(profiles, persons):
+                birth = person.get('birthDate')
+                computed_age = age_from_birth_date(birth) if birth else None
+                if (
+                    profile.age is not None and computed_age is not None
+                    and abs(profile.age - computed_age) > 1
+                ):
+                    continue
+                if birth:
+                    profile.birthDate = str(birth)
+                # Checked against "relative"-sourced entries specifically --
+                # associates alone would make profile.relatives non-empty and
+                # mask a person with zero DOM relatives but real ones in
+                # JSON-LD (Claire Inman: 4 associates, 0 DOM relatives).
+                if not any(r.get('source') == 'relative' for r in profile.relatives):
+                    associates_only = [
+                        r for r in profile.relatives if r.get('source') != 'relative'
+                    ]
+                    fallback_relatives = [
+                        {**r, "source": "relative"}
+                        for r in related_names(person.get('relatedTo'))
+                    ]
+                    profile.relatives = fallback_relatives + associates_only
 
         return profiles
 

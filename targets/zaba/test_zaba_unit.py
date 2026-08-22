@@ -149,11 +149,13 @@ def test_multiple_profile_extraction():
     assert len(p1.emailAddresses) == 1
     assert len(p1.relatives) == 2
 
-    # Check second profile
+    # Check second profile -- associates are folded into relatives (see
+    # targets/zaba/models.py), so its 1 relative + 1 associate become 2
     p2 = profiles[1]
-    print(f"   [2] {p2.fullName}: age={p2.age}, phones={len(p2.phoneNumbers)}, associates={len(p2.associates)}")
+    print(f"   [2] {p2.fullName}: age={p2.age}, phones={len(p2.phoneNumbers)}, relatives={len(p2.relatives)}")
     assert p2.fullName == "James A Oehring"
-    assert len(p2.associates) == 1
+    assert len(p2.relatives) == 2
+    assert {r["relationship"] for r in p2.relatives} == {"family", "associate"}
 
     # Check third profile
     p3 = profiles[2]

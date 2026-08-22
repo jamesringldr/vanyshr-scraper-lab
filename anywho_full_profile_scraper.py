@@ -126,6 +126,8 @@ class AnyWhoFullProfileScraper:
                 if self._address_key(address) != current_key
             ]
             profile.familyMembers = self._extract_relatives(soup)
+            profile.aliases = self._extract_aliases(soup)
+            profile.legalRecords = self._extract_legal_records(soup)
 
             logger.debug(
                 f"Parsed AnyWho profile: {profile.fullName}, "
@@ -376,10 +378,13 @@ class AnyWhoFullProfileScraper:
         remainder = cls.PROPERTY_SINGLE_YEAR.sub('', remainder)
         return remainder.strip()
 
+    GENDER_AGE = re.compile(r'^(Male|Female)\s*\W\s*(\d{1,3})$', re.IGNORECASE)
+
     def _extract_relatives(self, soup) -> List[Dict[str, Any]]:
         """
         Family members appear as "Relative data result: <Name>" headings,
-        optionally followed by "Female-65".
+        the next sibling <p> optionally carrying "Female•65" -- gender and
+        age of the relative, not of the profile subject.
         """
         relatives: List[Dict[str, Any]] = []
         seen = set()
@@ -392,5 +397,64 @@ class AnyWhoFullProfileScraper:
             if not name or name in seen:
                 continue
             seen.add(name)
-            relatives.append({"name": name})
+            relative: Dict[str, Any] = {"name": name}
+
+            sibling = heading.find_next_sibling('p')
+            if sibling:
+                demo = self.GENDER_AGE.match(self._clean(self._reconstruct(sibling)))
+                if demo:
+                    relative["gender"] = demo.group(1).capitalize()
+                    relative["age"] = int(demo.group(2))
+
+            relatives.append(relative)
+
         return relatives[: self.MAX_VALUES]
+
+    # "Aka: James Allen Oehring Jr." or "Aka: A, B or C" -- a natural-language
+    # list, not consistently comma-separated
+    AKA_SPLIT = re.compile(r',\s*|\s+or\s+', re.IGNORECASE)
+
+    def _extract_aliases(self, soup) -> List[str]:
+        """
+        The "Aka: ..." line sitting right under the name/age header this
+        scraper already reads.
+        """
+        node = soup.find(string=lambda s: s and s.strip().startswith('Aka:'))
+        if not node or not node.parent:
+            return []
+
+        text = self._clean(self._reconstruct(node.parent))
+        text = re.sub(r'^Aka:\s*', '', text, flags=re.IGNORECASE)
+        return [name.strip() for name in self.AKA_SPLIT.split(text) if name.strip()]
+
+    def _extract_legal_records(self, soup) -> Dict[str, Any]:
+        """
+        #court-records ("Legal Records (N)"): a nationwide count, plus a
+        county-level count when the person has local records. The category
+        list (Police/Criminal, Sex Offender, ...) alongside it is generic
+        upsell boilerplate, not real per-record data -- not extracted.
+        """
+        card = self._card(soup, "Legal Records")
+        if not card:
+            return {}
+
+        result: Dict[str, Any] = {}
+        for h3 in card.find_all('h3'):
+            heading = self._clean(h3.get_text())
+            block = h3.parent
+            if not block:
+                continue
+            paragraphs = block.find_all('p', recursive=False)
+            if len(paragraphs) < 2:
+                continue
+
+            location = self._clean(paragraphs[0].get_text())
+            count_match = re.search(r'(\d+)', paragraphs[1].get_text())
+            count = int(count_match.group(1)) if count_match else None
+
+            if heading == 'County Records':
+                result['countyRecords'] = {"location": location, "count": count}
+            elif heading == 'Nationwide Search':
+                result['nationwideCount'] = count
+
+        return result

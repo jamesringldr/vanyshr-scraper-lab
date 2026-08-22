@@ -70,6 +70,34 @@ def extract_person(html: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def extract_all_persons(html: str) -> List[Dict[str, Any]]:
+    """
+    Return every top-level schema.org Person object on the page, in document
+    order -- for pages like Zaba's that can list more than one person (e.g.
+    "More than 1 record found for Lucas Clark"), where extract_person()'s
+    first-match behaviour would only ever see the first one.
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    people: List[Dict[str, Any]] = []
+
+    for script in soup.find_all('script', type='application/ld+json'):
+        try:
+            data = json.loads(script.string or "")
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        candidates = data if isinstance(data, list) else [data]
+        for candidate in list(candidates):
+            if isinstance(candidate, dict) and isinstance(candidate.get('@graph'), list):
+                candidates.extend(candidate['@graph'])
+
+        for candidate in candidates:
+            if isinstance(candidate, dict) and candidate.get('@type') == 'Person':
+                people.append(_unescape_deep(candidate))
+
+    return people
+
+
 def format_phone(raw: Any) -> str:
     """Normalise a phone value to (XXX) XXX-XXXX, or "" if it isn't one."""
     digits = PHONE_DIGITS.sub('', str(raw or ""))

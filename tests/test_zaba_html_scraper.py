@@ -94,6 +94,13 @@ class TestKnownProfile:
     def test_relatives(self, oehring):
         assert [r["name"] for r in oehring.relatives] == ["Rickilinda R Oehring"]
 
+    def test_relatives_tagged_by_source(self, oehring):
+        assert oehring.relatives[0]["source"] == "relative"
+
+    def test_birth_date(self, oehring):
+        # From JSON-LD, which this scraper otherwise never reads
+        assert oehring.birthDate == "1988"
+
     def test_unmasked_email_is_kept(self, oehring):
         assert oehring.emailAddresses == ["rickioehring@yahoo.com"]
 
@@ -165,6 +172,43 @@ class TestMultipleResults:
             assert len(profile.phoneNumbers) <= 20
             assert len(profile.emailAddresses) <= 20
             assert len(profile.aliases) <= 20
+
+    def test_blank_dom_relatives_fall_back_to_jsonld(self, scraper):
+        """
+        Both Lucas Clark records have an empty "Possible Relatives" <ul> in
+        the DOM (a real gap, not a selector bug) -- relatives only exist in
+        this page's JSON-LD relatedTo, matched to each record by position.
+        """
+        profiles = scraper._extract_profiles_from_html(load("lucas_clark_mo"))
+        for profile in profiles:
+            assert profile.relatives, f"age {profile.age} record got no relatives"
+            assert all(r["source"] == "relative" for r in profile.relatives)
+
+    def test_birth_dates_matched_to_the_right_record(self, scraper):
+        # Two distinct people on one page -- each must get its own birthDate,
+        # not the other's (the position-based JSON-LD pairing's main risk)
+        profiles = scraper._extract_profiles_from_html(load("lucas_clark_mo"))
+        by_age = {p.age: p.birthDate for p in profiles}
+        assert by_age == {34: "1991", 30: "1996"}
+
+    def test_job_history(self, scraper):
+        profiles = scraper._extract_profiles_from_html(load("lucas_clark_mo"))
+        with_jobs = [p for p in profiles if p.jobHistory]
+        assert with_jobs, "no jobHistory captured"
+        assert all(j.get("title") and j.get("employer") for j in with_jobs[0].jobHistory)
+
+    def test_education(self, scraper):
+        profiles = scraper._extract_profiles_from_html(load("lucas_clark_mo"))
+        educated = [p for p in profiles if p.education]
+        assert educated, "no education captured"
+        assert "Northwest Missouri State University" in educated[0].education[0]
+
+    def test_associates_folded_into_relatives(self, scraper):
+        # Claire Inman: 4 "Possible Associations" entries, no separate field
+        profile = scraper._extract_profiles_from_html(load("claire_inman_ks"))[0]
+        associates = [r for r in profile.relatives if r["source"] == "associate"]
+        assert len(associates) == 4
+        assert not hasattr(profile, "associates")
 
 
 class TestSummaryProjection:

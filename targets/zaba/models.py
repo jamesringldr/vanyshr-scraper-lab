@@ -36,15 +36,21 @@ class Profile:
     profileId: str
     fullName: str
     age: Optional[int] = None
+    # Full ISO date when Zaba's JSON-LD has one, otherwise just a year
+    birthDate: str = ""
     currentAddress: Dict[str, str] = field(default_factory=dict)
     phoneNumbers: List[Dict[str, str]] = field(default_factory=list)
     emailAddresses: List[str] = field(default_factory=list)
+    # Associates are folded in here too, each tagged "source": "relative" or
+    # "associate" -- displayed as one family & friends list, the user sorts
+    # out who's who during onboarding rather than the scraper guessing.
     relatives: List[Dict[str, str]] = field(default_factory=list)
-    associates: List[Dict[str, str]] = field(default_factory=list)
     properties: List[Dict[str, Any]] = field(default_factory=list)
     # Zaba-only extras, not published by the other three brokers
     aliases: List[str] = field(default_factory=list)
     pastAddresses: List[Dict[str, str]] = field(default_factory=list)
+    jobHistory: List[Dict[str, str]] = field(default_factory=list)
+    education: List[str] = field(default_factory=list)
 
 
 @dataclass

@@ -219,6 +219,20 @@ class TestFps:
         assert details["propertyClass"] == "Residential"
         assert details["lotSqFt"] == 8712
 
+    def test_no_aliases_when_page_has_none(self, fps):
+        # James's fixture has no "Also Known As" section or JSON-LD
+        # additionalName -- confirms this doesn't fabricate any
+        assert fps.aliases == []
+
+    def test_no_associates_when_page_has_none(self, fps):
+        # James's fixture has no #associate-links section
+        assert not any(r.get("source") == "associate" for r in fps.relatives)
+
+    def test_employment(self, fps):
+        assert fps.employment == [
+            {"employer": "RINGLDR", "location": "Kansas City, MO", "title": "FOUNDER"}
+        ]
+
 
 class TestNpd:
     def test_identity(self, npd):
@@ -356,6 +370,23 @@ class TestAnyWho:
     def test_family_members(self, anywho):
         assert [f["name"] for f in anywho.familyMembers] == ["Rickilinda Oehring"]
 
+    def test_family_member_demographics(self, anywho):
+        # "Female•65" sits right below the name heading this scraper already
+        # reads -- gender/age of the relative, not of the profile subject
+        assert anywho.familyMembers[0]["gender"] == "Female"
+        assert anywho.familyMembers[0]["age"] == 65
+
+    def test_aliases(self, anywho):
+        # "Aka: James Allen Oehring Jr." -- no Profile.aliases field existed
+        assert anywho.aliases == ["James Allen Oehring Jr."]
+
+    def test_legal_records(self, anywho):
+        # #court-records ("Legal Records (4)") -- entirely unextracted before
+        assert anywho.legalRecords["nationwideCount"] == 4
+        assert anywho.legalRecords["countyRecords"] == {
+            "location": "Dekalb, Missouri", "count": 2,
+        }
+
 
 class TestSecondFixtures:
     """Guard against overfitting to the oehring page."""
@@ -382,6 +413,16 @@ class TestSecondFixtures:
         assert details["estimatedEquity"] == 39813
         assert details["lastSaleAmount"] == 451535
         assert details["lastSaleDate"] == "2023-04-19"
+        # Fields only this fixture's #aka-links/#associate-links/employment/
+        # education sections have, unlike oehring's
+        assert set(profile.aliases) == {"Lucas C Ward", "Clark Lucas"}
+        associates = [r for r in profile.relatives if r.get("source") == "associate"]
+        assert len(associates) == 31
+        assert all("age" in a for a in associates)
+        assert profile.employment[0]["employer"] == "EHAWK, INC."
+        assert len(profile.jobHistory) == 9
+        assert all(j.get("title") for j in profile.jobHistory)
+        assert profile.education[0]["school"] == "NORTHWEST MISSOURI STATE UNIVERSITY"
 
     def test_anywho_rodgers(self):
         profile = AnyWhoFullProfileScraper(api_key="t")._parse_profile_html(
@@ -394,3 +435,12 @@ class TestSecondFixtures:
             assert email.count("@") == 1
         assert all(p.get("location") for p in profile.phoneNumbers)
         assert any(a.get("propertyType") for a in profile.previousAddresses)
+        # "Aka: Christopher Michael Rodgers, Kathy H Rodgers or Casey Rodgers"
+        # -- a natural-language list mixing ", " and " or " separators
+        assert profile.aliases == [
+            "Christopher Michael Rodgers", "Kathy H Rodgers", "Casey Rodgers",
+        ]
+        assert all("gender" in f and "age" in f for f in profile.familyMembers)
+        # No county-level breakdown on this fixture, nationwide count only
+        assert "countyRecords" not in profile.legalRecords
+        assert profile.legalRecords["nationwideCount"] == 34

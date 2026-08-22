@@ -30,12 +30,14 @@ class Profile:
     profileId: str = ""
     fullName: str = ""
     age: Optional[int] = None
+    aliases: List[str] = field(default_factory=list)
     currentAddress: Dict[str, str] = field(default_factory=dict)
     previousAddresses: List[Dict[str, str]] = field(default_factory=list)
     phoneNumbers: List[Dict[str, str]] = field(default_factory=list)
     emailAddresses: List[str] = field(default_factory=list)
     familyMembers: List[Dict[str, Any]] = field(default_factory=list)
     properties: List[Dict[str, Any]] = field(default_factory=list)
+    legalRecords: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

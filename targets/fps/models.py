@@ -29,13 +29,19 @@ class Profile:
     fullName: str = ""
     age: Optional[int] = None
     bornDate: str = ""  # e.g. "June 1965" -- month/year only, FPS never gives a day
+    aliases: List[str] = field(default_factory=list)
     currentAddress: Dict[str, str] = field(default_factory=dict)
     previousAddresses: List[Dict[str, str]] = field(default_factory=list)
     phoneNumbers: List[Dict[str, str]] = field(default_factory=list)
     emailAddresses: List[str] = field(default_factory=list)
+    # Associates are folded in here too, each tagged "source": "relative" or
+    # "associate" -- displayed as one family & friends list, the user sorts
+    # out who's who during onboarding rather than the scraper guessing.
     relatives: List[Dict[str, str]] = field(default_factory=list)
-    associates: List[Dict[str, str]] = field(default_factory=list)
     properties: List[Dict[str, Any]] = field(default_factory=list)
+    employment: List[Dict[str, str]] = field(default_factory=list)
+    jobHistory: List[Dict[str, str]] = field(default_factory=list)
+    education: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

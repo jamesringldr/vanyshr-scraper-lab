@@ -177,12 +177,13 @@ class ZabaScraper:
                 } if result.get("address") else {},
                 phoneNumbers=phone_numbers,
                 emailAddresses=email_addresses,
+                # Associates folded in here too (see targets/zaba/models.py) --
+                # already distinguishable via "relationship".
                 relatives=[
                     {"name": rel, "relationship": "family"}
                     for rel in (result.get("relatives") or [])
                     if rel
-                ],
-                associates=[
+                ] + [
                     {"name": assoc, "relationship": "associate"}
                     for assoc in (result.get("associates") or [])
                     if assoc
