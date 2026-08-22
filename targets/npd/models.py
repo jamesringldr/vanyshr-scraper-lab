@@ -29,7 +29,7 @@ class Address:
     street: str
     city: str
     state: str
-    zip: str = ""
+    postalCode: str = ""
     formatted: str = ""
     yearsActive: str = ""
     addressType: str = "current"

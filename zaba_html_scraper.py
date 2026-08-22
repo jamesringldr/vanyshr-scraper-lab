@@ -51,7 +51,9 @@ class ZabaHtmlScraper:
     BASE_URL = "https://www.zabasearch.com"
 
     MAX_RESULTS = 5
-    MAX_VALUES = 5
+    # Was 5 -- silently dropped phones (7->5, 9->5) and aliases (10->5) on
+    # real profiles. Raised with headroom above observed maxima.
+    MAX_VALUES = 20
 
     STATE_NAMES = {
         "AL": "alabama", "AK": "alaska", "AZ": "arizona", "AR": "arkansas",

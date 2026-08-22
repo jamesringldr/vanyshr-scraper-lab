@@ -162,9 +162,9 @@ class TestMultipleResults:
 
     def test_fields_capped(self, scraper):
         for profile in scraper._extract_profiles_from_html(load("lucas_clark_mo")):
-            assert len(profile.phoneNumbers) <= 5
-            assert len(profile.emailAddresses) <= 5
-            assert len(profile.aliases) <= 5
+            assert len(profile.phoneNumbers) <= 20
+            assert len(profile.emailAddresses) <= 20
+            assert len(profile.aliases) <= 20
 
 
 class TestSummaryProjection:

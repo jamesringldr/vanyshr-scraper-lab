@@ -28,9 +28,15 @@ logger = logging.getLogger(__name__)
 class NPDFullProfileScraper:
     """Scrapes full profiles from National Public Data using context.dev HTML method"""
 
-    MAX_RELATIVES = 10
+    # MAX_RELATIVES uses the same shared related_names() helper as FPS, which
+    # was confirmed dropping 36-39 of 46-49 relatives there -- raised here too
+    # for the same reason, even though this profile's own relatives happened
+    # to stay under the old cap.
+    MAX_RELATIVES = 60
     MAX_EMAILS = 10
-    MAX_ASSOCIATES = 10
+    # Was 10 -- silently dropped 26 of 36 associates on a real profile
+    # (James Oehring fixture). Raised with headroom above observed maxima.
+    MAX_ASSOCIATES = 50
 
     def __init__(self, api_key: Optional[str] = None):
         """Initialize with context.dev client"""

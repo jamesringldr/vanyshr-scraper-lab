@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 class FPSFullProfileScraper:
     """Scrapes full profiles from FastPeopleSearch using context.dev HTML method"""
 
-    MAX_RELATIVES = 10
+    # Was 10 -- silently dropped 36-39 of 46-49 relatives on real profiles
+    # (James/Lucas fixtures). Raised with headroom above observed maxima.
+    MAX_RELATIVES = 60
     MAX_EMAILS = 10
 
     # The site's own addresses, plus anything that signals a non-personal mailbox

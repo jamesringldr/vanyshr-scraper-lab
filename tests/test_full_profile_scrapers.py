@@ -148,8 +148,9 @@ class TestFps:
         assert fps.currentAddress["latitude"].startswith("39.")
 
     def test_relatives_extracted(self, fps):
-        # Previously empty despite 46 in the page's JSON-LD
-        assert len(fps.relatives) == 10
+        # Previously empty, then silently capped at 10 despite 45 in the
+        # page's JSON-LD -- MAX_RELATIVES raised so all of them come through.
+        assert len(fps.relatives) == 45
         assert fps.relatives[0]["name"] == "Rickilinda R Oehring"
 
     def test_only_real_phone(self, fps):

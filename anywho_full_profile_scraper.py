@@ -72,7 +72,9 @@ class AnyWhoFullProfileScraper:
     SKIP_TAGS = AnyWhoHtmlScraper.SKIP_TAGS
     _reconstruct_with_data_content = AnyWhoHtmlScraper._reconstruct_with_data_content
 
-    MAX_VALUES = 12
+    # Was 12 -- silently dropped 9 of 21 addresses on a real profile
+    # (Chris Rodgers fixture). Raised with headroom above observed maxima.
+    MAX_VALUES = 30
 
     EXCLUDED_EMAIL_FRAGMENTS = (
         'anywho.com', 'support@', 'noreply@', 'no-reply@', 'admin@',
